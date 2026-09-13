@@ -112,6 +112,7 @@ test('concurrent starts keep one dispatcher and repositories advance independent
     await Promise.all([
       command(state, ['start'], environment),
       command(state, ['start'], environment),
+      ...Array.from({ length: 8 }, () => command(state, ['status'], environment)),
     ]);
     await until(() => readFileSync(messages, 'utf8').trim().split('\n').filter(Boolean).length === 2, 'first repository turns');
     let text = readFileSync(messages, 'utf8');
@@ -137,6 +138,58 @@ test('concurrent starts keep one dispatcher and repositories advance independent
     await until(() => running(state), 'restart after stop');
     await command(state, ['stop'], environment);
     await until(async () => !(await running(state)), 'second shutdown');
+  });
+});
+
+test('a shared status reader is not mistaken for the dispatcher and does not defeat startup', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    const ready = join(root, 'reader-ready');
+    const release = join(root, 'reader-release');
+    writeFileSync(messages, '');
+    writeFileSync(release, '');
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', process.argv.at(-1) + '\\n');
+    `);
+    const queued = add(state, root, 5, '10000000-0000-4000-8000-000000000005');
+    await running(state);
+
+    const readerSource = `
+      const fs = require('node:fs');
+      const { DatabaseSync } = require('node:sqlite');
+      const database = new DatabaseSync(process.env.REPOQ_DAEMON_DATABASE, { timeout: 0 });
+      database.exec('BEGIN');
+      database.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get();
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/pids', process.pid + '\\n');
+      fs.writeFileSync(process.env.REPOQ_READER_READY, 'ready');
+      const timer = setInterval(() => {
+        if (!fs.existsSync(process.env.REPOQ_READER_RELEASE)) {
+          clearInterval(timer);
+          database.exec('ROLLBACK');
+          database.close();
+        }
+      }, 10);
+    `;
+    const reader = spawn(process.execPath, ['-e', readerSource], {
+      env: {
+        ...environment,
+        REPOQ_DAEMON_DATABASE: join(state, 'daemon.sqlite3'),
+        REPOQ_READER_READY: ready,
+        REPOQ_READER_RELEASE: release,
+      },
+      stdio: 'ignore',
+    });
+    const readerExit = new Promise<void>((resolveExit) => reader.once('exit', () => resolveExit()));
+    await until(() => existsSync(ready), 'shared status reader');
+    assert.equal(await running(state), false);
+
+    const releaseReader = delay(500).then(() => rmSync(release, { force: true }));
+    await command(state, ['start'], environment);
+    await releaseReader;
+    await readerExit;
+    await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after shared reader');
+    assert.equal(await running(state), true);
   });
 });
 

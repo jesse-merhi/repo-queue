@@ -4,7 +4,7 @@
 
 The suite covers provider URL parsing, shared queue identity, FIFO order across repositories, concurrent clients, token fencing, duplicate claims, blocked recovery, failed notification, dispatcher restart and the packaged command. Migration fixtures exercise the existing SQLite schema rather than copying production state.
 
-The TypeScript implementation passed all 30 tests on Node 24.15. The package test installs the tarball into an isolated prefix and runs `repo-queue --version` outside the checkout. No Python runtime is required, including for the legacy SQLite migration fixture.
+The TypeScript implementation passed all 31 tests on Node 24.15. The package test installs the tarball into an isolated prefix and runs `repo-queue --version` outside the checkout. No Python runtime is required, including for the legacy SQLite migration fixture. A real-process regression holds a shared status read during startup and verifies that the dispatcher still acquires its lease and delivers the turn; concurrent starts also run alongside eight status clients.
 
 A live Codex desktop exercise using the TypeScript dispatcher also completed registration → original-conversation wake → claim → done. The fixture entry ended in `done` with delivery `sent` and no error.
 

@@ -19,6 +19,7 @@ const daemonDatabase = 'daemon.sqlite3';
 const legacyLock = 'dispatcher.lock';
 const stopRequest = 'stop';
 const deliveryLimit = 4;
+const daemonAcquireTimeoutMs = 2_000;
 
 function prepareState(state: string): string {
   const stateDirectory = resolve(state);
@@ -41,12 +42,18 @@ function sqliteBusy(error: unknown): boolean {
   return error instanceof Error && Reflect.get(error, 'errcode') === 5;
 }
 
-function acquire(state: string): DatabaseSync | undefined {
+function openDaemonDatabase(state: string, timeout: number): DatabaseSync {
   const path = resolve(state, daemonDatabase);
-  const database = new DatabaseSync(path, { timeout: 0 });
+  const database = new DatabaseSync(path, { timeout });
   chmodSync(path, 0o600);
+  database.exec(`PRAGMA busy_timeout = ${timeout}`);
+  return database;
+}
+
+function acquire(state: string): DatabaseSync | undefined {
+  const database = openDaemonDatabase(state, daemonAcquireTimeoutMs);
   try {
-    database.exec('PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE');
+    database.exec('BEGIN EXCLUSIVE');
     return database;
   } catch (error) {
     database.close();
@@ -59,14 +66,16 @@ function acquire(state: string): DatabaseSync | undefined {
 export async function running(state: string): Promise<boolean> {
   const stateDirectory = prepareState(state);
   assertLegacyDispatcherRemoved(stateDirectory);
-  const database = acquire(stateDirectory);
-  if (!database) return true;
+  const database = openDaemonDatabase(stateDirectory, 0);
   try {
-    database.exec('ROLLBACK');
+    database.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get();
+    return false;
+  } catch (error) {
+    if (sqliteBusy(error)) return true;
+    throw error;
   } finally {
     database.close();
   }
-  return false;
 }
 
 function executableArguments(state: string): readonly [string, readonly string[]] {
