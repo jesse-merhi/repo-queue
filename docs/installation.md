@@ -1,0 +1,59 @@
+# Installation and upgrades
+
+## Build and install
+
+Use a supported Node release (24.13+) on macOS or Linux. From a checkout:
+
+```sh
+npm ci
+npm run validate
+npm pack
+npm install --global --prefix "$HOME/.local" ./repoq-0.1.0.tgz
+```
+
+Add `$HOME/.local/bin` to your PATH if needed. `repo-queue doctor` checks the runtime and agent executables without calling a model. At least the adapter you intend to use must be authenticated and available on the dispatcher's PATH.
+
+The tarball contains compiled JavaScript and the agent skill. Once installed from the tarball, the command does not depend on the development checkout. Do not use a symlink to a disposable worktree for a permanent background service.
+
+## Install the agent skill
+
+Copy the complete `skills/repo-queue` directory to the appropriate directory, preserving other skills:
+
+- Codex: `~/.codex/skills/repo-queue`
+- Claude Code: `~/.claude/skills/repo-queue`
+
+Inspect an existing destination before changing it. Preserve local modifications or another owner's skill. The source has complete variants for GPT-5.6, GPT-6 Astra, Claude Fable 5.1 and Claude Opus 5. Select the matching `variants/*.md` file as the installed `SKILL.md`; do not change your model. `BASE.md` is the shared source for maintainers.
+
+Materialize that selection by copying the chosen variant to the destination `SKILL.md`. If the destination `SKILL.md` is a verified RepoQ symlink, unlink it first so copying does not overwrite its target. npm tarballs omit the source symlink, so copying the extracted directory alone is not a complete skill installation.
+
+New sessions discover the skill. For consistent automatic use, add this to your own global agent instructions:
+
+> For authorized GitHub or Bitbucket Cloud PR merges, use the repo-queue skill before final update, validation and merge, even when I do not mention the queue. A request to implement or review alone does not authorize a merge or require a turn.
+
+Do not replace your existing global instructions with this paragraph. Already-running conversations may retain older instructions. Claude's existing interactive process must exit before the standalone resume adapter can take over that session.
+
+## Background operation
+
+```sh
+repo-queue start
+repo-queue status
+repo-queue stop
+```
+
+`start` detaches from your terminal. Run it again after login or reboot; repeated starts are safe. The skill calls it before registration. `serve` runs in the foreground for a process supervisor, which should run it as the same OS user with the same PATH and state directory as your agents.
+
+State defaults to `~/.local/state/repo-queue`. Set `REPO_QUEUE_STATE` or pass `--state` for another location. All participants must use the same directory. Keep it on a local filesystem, never a network share. It contains conversation IDs, paths, PR URLs and tokens; do not commit or share it.
+
+## Upgrade from the Python preview
+
+The TypeScript version reads the existing SQLite entries without changing IDs, order or tokens. Its dispatcher lock differs, so never run both dispatchers on one state directory.
+
+1. Ask participating agents to pause new registrations during the upgrade. Use the **old** command to save status, including every unfinished entry's ID and token. Let claimed work finish or explicitly resolve it; do not release reservations while work is still running. A delivered message may still be waiting in a conversation's inbox.
+2. Run the old `repo-queue stop`, then use the old `repo-queue status` to verify `dispatcher_running` is false. Stopping the dispatcher does not terminate agents it already launched.
+3. Back up the state directory after writers have stopped. Record the resolved path of the old executable and retain that checkout. If the install destination is a verified RepoQ Python symlink, move that link to an unused backup name before npm installs its replacement. Do not remove its target or overwrite a foreign command.
+4. Rename the old `dispatcher.lock` file within that state directory to `dispatcher.python-stopped.lock`. The new dispatcher refuses to start while the old filename exists. Rename only after verifying that the old service has stopped.
+5. Install the new tarball and matching skills, then run `repo-queue start` and `repo-queue status`. Compare the saved IDs, tokens, order and reservations. Pending entries can be delivered; previously sent entries keep their existing wake message.
+6. Inspect any `uncertain` or failed delivery in the original conversation. A successful claim/done remains authoritative even if delivery bookkeeping was interrupted. For an unclaimed reservation, resolve the delivery cause and use `retry` with its current token; for claimed or blocked work, establish that the old owner and remote jobs have stopped before `recover --quiescent`. These operations replace the token so delayed messages cannot claim an old turn. Never retry merely because delivery is taking time.
+7. Resume registrations after reconciliation. Retire the old executable only when every unfinished entry from the saved snapshot has completed or been recovered with a new token, and no old agent process or queued wake still needs its absolute path. Otherwise keep it available.
+
+The new dispatcher uses a separate SQLite lock database. A crash releases the process lock while PR reservations remain durable. Notifications left in flight become uncertain and need explicit recovery; the new dispatcher does not automatically resend them.
