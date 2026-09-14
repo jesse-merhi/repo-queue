@@ -97,9 +97,24 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function claudeFinalResult(value: unknown): Record<string, unknown> | undefined {
+  if (record(value)) return value;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((event) => record(event) && typeof event.type === 'string')
+  ) {
+    return undefined;
+  }
+  const results = value.filter((event) => event.type === 'result');
+  const final = value.at(-1);
+  return results.length === 1 && results[0] === final ? final : undefined;
+}
+
 function verifyClaudeResult(output: string, expectedSession: string): void {
   const parsed: unknown = JSON.parse(output);
-  if (!record(parsed) || parsed.session_id !== expectedSession || parsed.is_error !== false) {
+  const result = claudeFinalResult(parsed);
+  if (result === undefined || result.session_id !== expectedSession || result.is_error !== false) {
     throw new Error('Claude did not successfully resume the requested session; inspect its history before retrying');
   }
 }

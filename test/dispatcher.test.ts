@@ -141,6 +141,25 @@ test('concurrent starts keep one dispatcher and repositories advance independent
   });
 });
 
+test('an immediate CLI restart replaces the stopped dispatcher and delivers later work', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    writeFileSync(messages, '');
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', process.argv.at(-1) + '\\n');
+    `);
+
+    await command(state, ['start'], environment);
+    await command(state, ['stop'], environment);
+    await command(state, ['start'], environment);
+    const queued = add(state, root, 4, '10000000-0000-4000-8000-000000000004');
+
+    await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after immediate restart');
+    assert.equal(await running(state), true);
+  });
+});
+
 test('a shared status reader is not mistaken for the dispatcher and does not defeat startup', async () => {
   await fixture(async (root, state, environment) => {
     const messages = join(root, 'messages');

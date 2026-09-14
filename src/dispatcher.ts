@@ -23,6 +23,7 @@ const legacyLock = 'dispatcher.lock';
 const stopRequest = 'stop';
 const deliveryLimit = 4;
 const daemonAcquireDeadlineMs = 2_000;
+const daemonStopDeadlineMs = 5_000;
 const internalStopGeneration = 'REPOQ_INTERNAL_STOP_GENERATION';
 const missingStopGeneration = '-';
 
@@ -171,6 +172,12 @@ export async function start(state: string): Promise<void> {
 export async function stop(state: string): Promise<void> {
   const stateDirectory = prepareState(state);
   publishStopGeneration(resolve(stateDirectory, stopRequest));
+  const deadline = Date.now() + daemonStopDeadlineMs;
+  while (Date.now() < deadline) {
+    if (!probe(stateDirectory)) return;
+    await delay(50);
+  }
+  throw new Error('Dispatcher did not stop; inspect dispatcher.log');
 }
 
 function shellWord(value: string): string {

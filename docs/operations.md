@@ -25,7 +25,7 @@ If an agent is waiting for a human approval, it should `block` with a reason and
 
 ## Shutdown and restart
 
-`stop` requests dispatcher shutdown. `serve` also handles ordinary termination signals. Already started agent processes may keep running; stop never marks their work done. Keep their reservations and confirm their state before recovery.
+`stop` requests dispatcher shutdown and waits up to five seconds for its lock to be released. It reports an error if shutdown is not confirmed; a successful return permits an immediate `start`. `serve` also handles ordinary termination signals. Already started agent processes may keep running; stop never marks their work done. Keep their reservations and confirm their state before recovery.
 
 On restart, an abandoned `sending` notification becomes `uncertain`. Check the original conversation before retrying. If it acted on the message, continue that work rather than starting another owner. Late callbacks with an obsolete token cannot update a recovered entry.
 

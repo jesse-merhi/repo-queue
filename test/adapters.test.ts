@@ -138,40 +138,90 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
   });
 });
 
-test('Claude resumes the exact exited owner in its original directory', async () => {
-  await fixture(async (directory) => {
-    const capture = join(directory, 'resume.json');
-    process.env.REPOQ_CAPTURE = capture;
-    executable(directory, 'claude', `
-      const fs = require('node:fs');
-      const args = process.argv.slice(2);
-      if (args[0] === 'agents') process.stdout.write('[]');
-      else {
-        fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({ args, cwd: process.cwd() }));
-        process.stdout.write(JSON.stringify({ session_id: '${task}', is_error: false }));
-      }
-    `);
-    await deliver(entry('claude'), 'wake');
-    const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
-    assert.deepEqual(observed, {
-      args: [
-        '-p', '--resume', task, '--output-format', 'json',
-        '--permission-prompts', 'none', '--', 'wake',
+test('Claude accepts ordinary and verbose success output for the exact exited owner', async (context) => {
+  const result = {
+    type: 'result',
+    subtype: 'success',
+    session_id: task,
+    is_error: false,
+    result: 'wake accepted',
+  };
+  const cases: readonly { readonly name: string; readonly output: unknown }[] = [
+    { name: 'ordinary result object', output: result },
+    {
+      name: 'verbose event array',
+      output: [
+        { type: 'system', subtype: 'init', session_id: task },
+        { type: 'assistant', message: { role: 'assistant', content: [] }, session_id: task },
+        result,
       ],
-      cwd: realpathSync(tmpdir()),
+    },
+  ];
+  for (const item of cases) {
+    await context.test(item.name, async () => {
+      await fixture(async (directory) => {
+        const capture = join(directory, 'resume.json');
+        process.env.REPOQ_CAPTURE = capture;
+        executable(directory, 'claude', `
+          const fs = require('node:fs');
+          const args = process.argv.slice(2);
+          if (args[0] === 'agents') process.stdout.write('[]');
+          else {
+            fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({ args, cwd: process.cwd() }));
+            process.stdout.write(${JSON.stringify(JSON.stringify(item.output))});
+          }
+        `);
+        try {
+          await deliver(entry('claude'), 'wake');
+          const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
+          assert.deepEqual(observed, {
+            args: [
+              '-p', '--resume', task, '--output-format', 'json',
+              '--permission-prompts', 'none', '--', 'wake',
+            ],
+            cwd: realpathSync(tmpdir()),
+          });
+        } finally {
+          delete process.env.REPOQ_CAPTURE;
+        }
+      });
     });
-    delete process.env.REPOQ_CAPTURE;
-  });
+  }
 });
 
-test('Claude response must identify the exact session and explicit success', async () => {
-  await fixture(async (directory) => {
-    executable(directory, 'claude', `
-      if (process.argv[2] === 'agents') process.stdout.write('[]');
-      else process.stdout.write(JSON.stringify({ session_id: '${task}' }));
-    `);
-    await assert.rejects(deliver(entry('claude'), 'wake'), /requested session/);
-  });
+test('Claude response must end with one result for the exact session and explicit success', async (context) => {
+  const cases: readonly { readonly name: string; readonly output: unknown }[] = [
+    { name: 'ordinary result without explicit success', output: { session_id: task } },
+    {
+      name: 'verbose result for another session',
+      output: [{ type: 'result', subtype: 'success', session_id: 'different-session', is_error: false }],
+    },
+    {
+      name: 'verbose result followed by another event',
+      output: [
+        { type: 'result', subtype: 'success', session_id: task, is_error: false },
+        { type: 'assistant', message: { role: 'assistant', content: [] } },
+      ],
+    },
+    {
+      name: 'verbose output with duplicate results',
+      output: [
+        { type: 'result', subtype: 'success', session_id: task, is_error: false },
+        { type: 'result', subtype: 'success', session_id: task, is_error: false },
+      ],
+    },
+  ];
+  for (const item of cases) {
+    await context.test(item.name, async () => {
+      await fixture(async (directory) => {
+        executable(directory, 'claude', `
+          if (process.argv[2] === 'agents') process.stdout.write('[]');
+          else process.stdout.write(${JSON.stringify(JSON.stringify(item.output))});
+        `);
+        await assert.rejects(deliver(entry('claude'), 'wake'), /requested session/);
+      });
+    });
+  }
 });
 
 test('adapter failures redact ownership tokens and bound captured output', async () => {
