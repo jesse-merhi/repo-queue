@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -263,7 +262,7 @@ test('a new stop generation fences a dispatcher waiting between reader retries',
     try {
       await delay(250);
       assert.equal(contender.exitCode, null);
-      writeFileSync(join(state, 'stop'), randomUUID(), { mode: 0o600 });
+      await command(state, ['stop'], environment);
       rmSync(release, { force: true });
       await readerExit;
       await Promise.race([

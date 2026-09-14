@@ -170,9 +170,7 @@ export async function start(state: string): Promise<void> {
 /** Request shutdown without releasing reservations or terminating agent processes. */
 export async function stop(state: string): Promise<void> {
   const stateDirectory = prepareState(state);
-  if (await running(stateDirectory)) {
-    publishStopGeneration(resolve(stateDirectory, stopRequest));
-  }
+  publishStopGeneration(resolve(stateDirectory, stopRequest));
 }
 
 function shellWord(value: string): string {

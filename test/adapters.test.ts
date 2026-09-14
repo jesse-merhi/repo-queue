@@ -5,6 +5,7 @@ import { delimiter, join } from 'node:path';
 import { createServer } from 'node:net';
 import test from 'node:test';
 import { deliver } from '../src/adapters.ts';
+import { claudePidDomain } from '../src/claude-messaging.ts';
 import type { Entry } from '../src/types.ts';
 
 const task = '10000000-0000-4000-8000-000000000001';
@@ -94,7 +95,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       messagingSocketPath: socket,
       peerProtocol: 1,
       procStart: 'fixture-process-start',
-      pidDomain: process.platform === 'darwin' ? 'darwin' : 'linux',
+      pidDomain: claudePidDomain(),
     }), { mode: 0o600 });
     executable(directory, 'claude', `
       const fs = require('node:fs');

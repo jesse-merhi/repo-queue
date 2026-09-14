@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import test from "node:test";
 
 import {
+  claudePidDomain,
   claudeSenderPrompt,
   resolveClaudeLiveAddress,
+  verifyClaudePidDomain,
   verifyClaudeSenderOutput,
 } from "../src/claude-messaging.ts";
 import type { Entry } from "../src/types.ts";
@@ -36,7 +45,7 @@ function entry(cwd: string): Entry {
 }
 
 function pidDomain(): string {
-  return process.platform === "darwin" ? "darwin" : "linux";
+  return claudePidDomain();
 }
 
 function senderOutput(address: string, message: string): string {
@@ -110,6 +119,30 @@ test("rejects a stale Claude registry record before native sending", () => {
     const agents = JSON.stringify([{ sessionId: task, pid: process.pid, cwd: root }]);
     assert.throws(
       () => resolveClaudeLiveAddress(entry(root), agents, sessions),
+      /registry no longer matches/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("matches Claude's Linux machine and PID namespace domain exactly", () => {
+  const root = mkdtempSync(join(tmpdir(), "repoq-claude-linux-domain-"));
+  const machineId = join(root, "machine-id");
+  const pidNamespace = join(root, "pid-namespace");
+  writeFileSync(machineId, "0123456789abcdef0123456789abcdef\n");
+  symlinkSync("pid:[4026531836]", pidNamespace);
+  const sources = { platform: "linux" as const, machineIdPath: machineId, pidNamespacePath: pidNamespace };
+  try {
+    const domain = "linux:0123456789abcdef0123456789abcdef:pid:[4026531836]";
+    assert.equal(claudePidDomain(sources), domain);
+    assert.doesNotThrow(() => verifyClaudePidDomain(domain, sources));
+    assert.throws(
+      () => verifyClaudePidDomain("linux:different-machine:pid:[4026531836]", sources),
+      /registry no longer matches/,
+    );
+    assert.throws(
+      () => verifyClaudePidDomain("linux:0123456789abcdef0123456789abcdef:pid:[99]", sources),
       /registry no longer matches/,
     );
   } finally {

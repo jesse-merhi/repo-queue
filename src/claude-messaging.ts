@@ -5,6 +5,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -33,6 +34,12 @@ interface ClaudeSessionRecord {
 export interface ClaudeSendReceipt {
   readonly messageId: string;
   readonly permissionMode: string;
+}
+
+export interface ClaudePidDomainSources {
+  readonly platform?: NodeJS.Platform;
+  readonly machineIdPath?: string;
+  readonly pidNamespacePath?: string;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -111,10 +118,40 @@ function assertProcessIsAlive(pid: number): void {
   }
 }
 
-function platformPidDomain(): string {
-  if (process.platform === "darwin") return "darwin";
-  if (process.platform === "linux") return "linux";
+function readTextOrEmpty(path: string): string {
+  try {
+    return readFileSync(path, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function readLinkOrEmpty(path: string): string {
+  try {
+    return readlinkSync(path);
+  } catch {
+    return "";
+  }
+}
+
+export function claudePidDomain(sources: ClaudePidDomainSources = {}): string {
+  const platform = sources.platform ?? process.platform;
+  if (platform === "darwin") return "darwin";
+  if (platform === "linux") {
+    const machineId = readTextOrEmpty(sources.machineIdPath ?? "/etc/machine-id");
+    const pidNamespace = readLinkOrEmpty(sources.pidNamespacePath ?? "/proc/self/ns/pid");
+    return `linux:${machineId}:${pidNamespace}`;
+  }
   throw new Error("Claude live messaging is supported only on macOS and Linux");
+}
+
+export function verifyClaudePidDomain(
+  actual: string,
+  sources: ClaudePidDomainSources = {},
+): void {
+  if (actual !== claudePidDomain(sources)) {
+    throw new Error("Claude live-session registry no longer matches the registered owner");
+  }
 }
 
 function assertSocket(path: string, userId: number): void {
@@ -193,11 +230,11 @@ export function resolveClaudeLiveAddress(
     session.pid !== active.pid ||
     session.sessionId !== entry.task ||
     canonicalDirectory(session.cwd) !== ownerDirectory ||
-    session.peerProtocol !== 1 ||
-    session.pidDomain !== platformPidDomain()
+    session.peerProtocol !== 1
   ) {
     throw new Error("Claude live-session registry no longer matches the registered owner");
   }
+  verifyClaudePidDomain(session.pidDomain);
   assertProcessIsAlive(session.pid);
   assertSocket(session.messagingSocketPath, userId);
   return `uds:${session.messagingSocketPath}`;
