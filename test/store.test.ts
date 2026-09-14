@@ -371,6 +371,77 @@ describe("Store", () => {
     item.store.close();
   });
 
+  test("verifies a claimed owner without repeating or changing the claim", () => {
+    const item = fixture();
+    const task = randomUUID();
+    add(item, "https://github.com/acme/widget/pull/1", { task });
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    const claimed = item.store.claim(reserved.id, ownerToken);
+
+    assert.throws(
+      () => item.store.claim(claimed.id, ownerToken),
+      StateError,
+    );
+    const beforeVerification = firstEntry(item.store.list());
+    const verified = item.store.verifyClaim(claimed.id, ownerToken, {
+      agent: "codex",
+      task,
+      cwd: item.cwd,
+    });
+
+    assert.deepEqual(verified, claimed);
+    assert.deepEqual(item.store.list(), [beforeVerification]);
+    item.store.close();
+  });
+
+  test("rejects claim verification for the wrong state, token, or owner tuple", () => {
+    const item = fixture();
+    const task = randomUUID();
+    const otherCwd = join(item.root, "other-worktree");
+    mkdirSync(otherCwd);
+    const waiting = add(item, "https://github.com/acme/waiting/pull/1");
+
+    assert.throws(
+      () => item.store.verifyClaim(waiting.id, requireToken(waiting), {
+        agent: waiting.agent,
+        task: waiting.task,
+        cwd: waiting.cwd,
+      }),
+      StateError,
+    );
+
+    add(item, "https://github.com/acme/widget/pull/1", { task });
+    const reserved = item.store.reserve().find((entry) => entry.repo.endsWith("/widget"));
+    if (reserved === undefined) {
+      throw new Error("expected the widget entry to be reserved");
+    }
+    const ownerToken = requireToken(reserved);
+    const claimed = item.store.claim(reserved.id, ownerToken);
+    const original = item.store.list();
+
+    assert.throws(
+      () => item.store.verifyClaim(claimed.id, "stale-token", {
+        agent: "codex",
+        task,
+        cwd: item.cwd,
+      }),
+      OwnershipError,
+    );
+    for (const owner of [
+      { agent: "claude", task, cwd: item.cwd },
+      { agent: "codex", task: randomUUID(), cwd: item.cwd },
+      { agent: "codex", task, cwd: otherCwd },
+    ] as const) {
+      assert.throws(
+        () => item.store.verifyClaim(claimed.id, ownerToken, owner),
+        OwnershipError,
+      );
+    }
+    assert.deepEqual(item.store.list(), original);
+    item.store.close();
+  });
+
   test("delivery failure holds the reservation until an explicit retry", () => {
     const item = fixture();
     add(item, "https://github.com/acme/widget/pull/1");

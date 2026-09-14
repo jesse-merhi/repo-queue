@@ -8,6 +8,15 @@ A successful notification only means the adapter accepted or completed the resum
 
 ## Recover a failed notification
 
+If the original conversation already claimed its turn and lost its checkpoint after compaction, verify that existing claim instead of claiming again:
+
+```sh
+repo-queue verify-claim ENTRY_ID --token TOKEN \
+  --agent codex --task CURRENT_CONVERSATION_UUID --cwd /original/worktree
+```
+
+Use the actual current conversation identity (`--agent claude` for Claude). The read-only command succeeds only for the matching owner, token and claimed state. Continue the saved workflow and account for jobs already running. A duplicate wake does not cancel an existing claim. A blocked entry still needs explicit recovery; verification does not unblock it.
+
 Resolve authentication, missing executables, moved directories or the still-running Claude process, then use `retry ID --token TOKEN`. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
 
 When the owner has already claimed or blocked, use `recover ID --token TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.

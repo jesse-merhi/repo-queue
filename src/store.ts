@@ -1,6 +1,7 @@
 import {
   chmodSync,
   mkdirSync,
+  realpathSync,
   statSync,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -459,6 +460,48 @@ export class Store {
         .run(now(), id);
       return this.updated(id);
     });
+  }
+
+  verifyClaim(
+    id: string,
+    suppliedToken: string,
+    owner: Readonly<Pick<AddEntryInput, "agent" | "task" | "cwd">>,
+  ): Entry {
+    const entry = this.owned(id, suppliedToken);
+    if (entry.state !== "claimed") {
+      throw new StateError(
+        `queue entry claim cannot be verified from state ${entry.state}`,
+      );
+    }
+    if (!member(owner.agent, agents)) {
+      throw new TypeError("agent must be codex or claude");
+    }
+    const task = boundedString(owner.task, "task", MAX_TASK_LENGTH);
+    if (!UUID.test(task)) {
+      throw new TypeError("task must be a UUID");
+    }
+    const cwd = boundedString(owner.cwd, "cwd", MAX_PATH_LENGTH);
+    if (!isAbsolute(cwd)) {
+      throw new TypeError("cwd must be absolute");
+    }
+    let ownerCwd: string;
+    let entryCwd: string;
+    try {
+      ownerCwd = realpathSync(cwd);
+      entryCwd = realpathSync(entry.cwd);
+    } catch {
+      throw new OwnershipError("queue entry owner cwd is unavailable");
+    }
+    if (
+      entry.agent !== owner.agent ||
+      entry.task !== task ||
+      entryCwd !== ownerCwd
+    ) {
+      throw new OwnershipError(
+        "queue entry is claimed by a different agent, task, or cwd",
+      );
+    }
+    return entry;
   }
 
   done(id: string, suppliedToken: string): Entry {

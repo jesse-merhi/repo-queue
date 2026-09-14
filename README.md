@@ -49,6 +49,8 @@ repo-queue done ENTRY_ID --token TOKEN
 
 A claim succeeds once. Duplicate or stale notifications cannot start a second owner. Completion moves the next PR forward. Queue membership grants no new merge, publication or CI-spending authority.
 
+After compaction or a resumed conversation, `verify-claim` confirms an existing claim using its token and the original agent, conversation and worktree. It does not claim again or change queue state. See [recovery](docs/operations.md#recover-a-failed-notification).
+
 ## When work stops
 
 ```sh

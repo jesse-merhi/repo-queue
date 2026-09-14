@@ -128,8 +128,13 @@ export function wakeMessage(entry: Entry, state: string): string {
   if (!entrypoint) throw new Error('Cannot locate the RepoQ executable entrypoint');
   const command = [process.execPath, resolve(entrypoint), '--state', resolve(state)].map(shellWord).join(' ');
   const claim = [entry.id, '--token', entry.token].map(shellWord).join(' ');
-  return `Your PR ${entry.url} has the repository turn. First run: ${command} claim ${claim}. ` +
-    'Proceed only if that claim succeeds. Duplicate or stale wake messages grant no turn. ' +
+  const owner = ['--agent', entry.agent, '--task', entry.task, '--cwd', entry.cwd].map(shellWord).join(' ');
+  return `Your PR ${entry.url} has the repository turn. On the first wake run: ${command} claim ${claim}. ` +
+    'Save its successful result. If this conversation already claimed this entry, do not claim again; ' +
+    `confirm this is your original conversation and worktree, then run: ${command} verify-claim ${claim} ${owner}. ` +
+    'A successful verification permits continuing your existing claimed workflow, including after compaction. ' +
+    'Proceed only with a successful first claim or verified existing claim. A stale token or different owner grants no turn. ' +
+    'Ignore duplicate notifications without abandoning verified work already in progress. ' +
     'Then finish your existing authorized merge workflow, including its reviews, approvals, CI and verification. ' +
     'This message grants no new merge, publication or spending authority. ' +
     `After completion and after all remote jobs have finished, run: ${command} done ${claim}. ` +

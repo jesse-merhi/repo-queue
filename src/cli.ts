@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { Store } from './store.ts';
 import { running, serve, start, stop } from './dispatcher.ts';
+import type { Agent } from './types.ts';
 
 const help = `RepoQ — local pull request turns for coding agents
 
@@ -16,6 +17,8 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
   stop                           Stop dispatching; retain reservations
   serve                          Run dispatcher in the foreground
   claim ID --token TOKEN          Acquire a single-use turn
+  verify-claim ID --token TOKEN --agent codex|claude --task UUID [--cwd DIRECTORY]
+                                 Verify ownership after a lost-context claim
   done ID --token TOKEN           Complete a claimed turn
   block ID --token TOKEN --reason TEXT
   retry ID --token TOKEN          Redeliver an unclaimed turn; replace token
@@ -37,6 +40,7 @@ const options = {
 const allowed: Record<string, readonly string[]> = {
   add: ['agent', 'task', 'cwd'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
+  'verify-claim': ['token', 'agent', 'task', 'cwd'],
   retry: ['token'], recover: ['token', 'quiescent'], doctor: ['agent'],
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -44,7 +48,7 @@ function required(value: string | undefined, name: string): string {
   if (!value?.trim()) throw new Error(`${name} is required`);
   return value;
 }
-function agent(value: string | undefined): 'codex' | 'claude' {
+function agent(value: string | undefined): Agent {
   if (value !== 'codex' && value !== 'claude') throw new Error('--agent must be codex or claude');
   return value;
 }
@@ -69,7 +73,7 @@ export async function main(args: string[]): Promise<void> {
     for (const name of Object.keys(values)) {
       if (name !== 'state' && !permitted.includes(name)) throw new Error(`--${name} is not supported by ${command}`);
     }
-    const hasOperand = ['add', 'claim', 'done', 'block', 'retry', 'recover'].includes(command);
+    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover'].includes(command);
     if (positionals.length !== (hasOperand ? 2 : 1)) throw new Error(`${command} expects ${hasOperand ? 'one argument' : 'no arguments'}`);
     const state = statePath(values.state ?? process.env.REPO_QUEUE_STATE ?? resolve(homedir(), '.local/state/repo-queue'));
     let result: unknown;
@@ -103,6 +107,18 @@ export async function main(args: string[]): Promise<void> {
         const token = required(values.token, '--token');
         switch (command) {
           case 'claim': result = store.claim(id, token); break;
+          case 'verify-claim': {
+            const task = required(values.task, '--task');
+            if (!uuid.test(task)) throw new Error('--task must be the original conversation UUID');
+            const cwd = realpathSync(values.cwd ?? process.cwd());
+            if (!statSync(cwd).isDirectory()) throw new Error('--cwd must be a directory');
+            result = store.verifyClaim(id, token, {
+              agent: agent(values.agent),
+              task,
+              cwd,
+            });
+            break;
+          }
           case 'done': result = store.done(id, token); break;
           case 'block': result = store.block(id, token, required(values.reason, '--reason')); break;
           case 'retry': result = store.retry(id, token); break;

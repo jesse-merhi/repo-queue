@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { Store } from '../src/store.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(root, 'bin/repo-queue');
@@ -50,6 +51,54 @@ test('CLI refuses recovery without a quiescence assertion', () => {
     const result = run(['--state', directory, 'recover', randomUUID(), '--token', 'token']);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /requires --quiescent/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('CLI verifies the original owner after a successful single-use claim', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-verify-claim-'));
+  try {
+    const state = join(directory, 'state');
+    const task = randomUUID();
+    const cwd = realpathSync(directory);
+    const store = new Store(state);
+    const added = store.add({
+      url: 'https://github.com/example/project/pull/164',
+      agent: 'codex',
+      task,
+      cwd,
+    });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved);
+    assert.ok(reserved.token);
+    const claimed = store.claim(added.id, reserved.token);
+    store.close();
+
+    const repeated = run([
+      '--state', state, 'claim', claimed.id, '--token', reserved.token,
+    ]);
+    assert.equal(repeated.status, 1);
+    assert.match(repeated.stderr, /cannot be claimed from state claimed/);
+
+    const verified = run([
+      '--state', state, 'verify-claim', claimed.id, '--token', reserved.token,
+      '--agent', 'codex', '--task', task, '--cwd', directory,
+    ]);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(object(verified.stdout).state, 'claimed');
+
+    const wrongOwner = run([
+      '--state', state, 'verify-claim', claimed.id, '--token', reserved.token,
+      '--agent', 'claude', '--task', task, '--cwd', directory,
+    ]);
+    assert.equal(wrongOwner.status, 1);
+    assert.match(wrongOwner.stderr, /different agent, task, or cwd/);
+
+    const wrongToken = run([
+      '--state', state, 'verify-claim', claimed.id, '--token', 'stale-token',
+      '--agent', 'codex', '--task', task, '--cwd', directory,
+    ]);
+    assert.equal(wrongToken.status, 1);
+    assert.match(wrongToken.stderr, /stale or invalid ownership token/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
