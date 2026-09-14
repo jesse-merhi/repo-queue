@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { wakeMessage } from '../src/dispatcher.ts';
 import { Store } from '../src/store.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -74,20 +76,20 @@ test('CLI verifies the original owner after a successful single-use claim', () =
     store.close();
 
     const repeated = run([
-      '--state', state, 'claim', claimed.id, '--token', reserved.token,
+      '--state', state, 'claim', claimed.id, `--token=${reserved.token}`,
     ]);
     assert.equal(repeated.status, 1);
     assert.match(repeated.stderr, /cannot be claimed from state claimed/);
 
     const verified = run([
-      '--state', state, 'verify-claim', claimed.id, '--token', reserved.token,
+      '--state', state, 'verify-claim', claimed.id, `--token=${reserved.token}`,
       '--agent', 'codex', '--task', task, '--cwd', directory,
     ]);
     assert.equal(verified.status, 0, verified.stderr);
     assert.equal(object(verified.stdout).state, 'claimed');
 
     const wrongOwner = run([
-      '--state', state, 'verify-claim', claimed.id, '--token', reserved.token,
+      '--state', state, 'verify-claim', claimed.id, `--token=${reserved.token}`,
       '--agent', 'claude', '--task', task, '--cwd', directory,
     ]);
     assert.equal(wrongOwner.status, 1);
@@ -100,6 +102,46 @@ test('CLI verifies the original owner after a successful single-use claim', () =
     assert.equal(wrongToken.status, 1);
     assert.match(wrongToken.stderr, /stale or invalid ownership token/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('wake commands claim, verify and finish with a leading-dash ownership token', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-token-'));
+  const previousEntrypoint = process.argv[1];
+  assert.ok(previousEntrypoint);
+  const state = join(directory, 'state');
+  const store = new Store(state);
+  try {
+    const entry = store.add({
+      url: 'https://github.com/example/project/pull/165',
+      agent: 'codex', task: randomUUID(), cwd: directory,
+    });
+    // Base64url tokens can start with a dash; fix that producer-supported case in this fixture.
+    const database = new DatabaseSync(store.databasePath);
+    try {
+      database.prepare('UPDATE entries SET token = ? WHERE id = ?').run('-fixture_token', entry.id);
+    } finally { database.close(); }
+    const reserved = store.reserve()[0];
+    assert.ok(reserved);
+    process.argv[1] = cli;
+    const message = wakeMessage(reserved, state);
+    const commands = [
+      message.split('On the first wake run: ')[1]?.split('. Save its successful result.')[0],
+      message.split('then run: ')[1]?.split('. A successful verification')[0],
+      message.split('After completion and after all remote jobs have finished, run: ')[1]?.split('. If blocked')[0],
+    ];
+    for (const [index, command] of commands.entries()) {
+      assert.ok(command);
+      const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 10_000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(object(result.stdout).state, index === 2 ? 'done' : 'claimed');
+    }
+    assert.equal(store.list()[0]?.state, 'done');
+  } finally {
+    process.argv[1] = previousEntrypoint;
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('packed command installs without runtime dependencies or its source checkout', () => {

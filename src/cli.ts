@@ -16,13 +16,13 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
   serve                          Run dispatcher in the foreground
-  claim ID --token TOKEN          Acquire a single-use turn
-  verify-claim ID --token TOKEN --agent codex|claude --task UUID [--cwd DIRECTORY]
+  claim ID --token=TOKEN          Acquire a single-use turn
+  verify-claim ID --token=TOKEN --agent codex|claude --task UUID [--cwd DIRECTORY]
                                  Verify ownership after a lost-context claim
-  done ID --token TOKEN           Complete a claimed turn
-  block ID --token TOKEN --reason TEXT
-  retry ID --token TOKEN          Redeliver an unclaimed turn; replace token
-  recover ID --token TOKEN --quiescent
+  done ID --token=TOKEN           Complete a claimed turn
+  block ID --token=TOKEN --reason TEXT
+  retry ID --token=TOKEN          Redeliver an unclaimed turn; replace token
+  recover ID --token=TOKEN --quiescent
                                  Recover only after old work has stopped
   doctor [--agent codex|claude]    Check runtime and agent executable access
   --version                      Print installed version

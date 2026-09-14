@@ -191,7 +191,7 @@ export function wakeMessage(entry: Entry, state: string): string {
   const entrypoint = process.argv[1];
   if (!entrypoint) throw new Error('Cannot locate the RepoQ executable entrypoint');
   const command = [process.execPath, resolve(entrypoint), '--state', resolve(state)].map(shellWord).join(' ');
-  const claim = [entry.id, '--token', entry.token].map(shellWord).join(' ');
+  const claim = [entry.id, `--token=${entry.token}`].map(shellWord).join(' ');
   const owner = ['--agent', entry.agent, '--task', entry.task, '--cwd', entry.cwd].map(shellWord).join(' ');
   return `Your PR ${entry.url} has the repository turn. On the first wake run: ${command} claim ${claim}. ` +
     'Save its successful result. If this conversation already claimed this entry, do not claim again; ' +

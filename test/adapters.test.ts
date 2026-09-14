@@ -72,6 +72,7 @@ test('Codex receives the exact task and the wake message as one argument', async
 test('a live Claude owner receives one exact native SendMessage call', async () => {
   await fixture(async (directory) => {
     const capture = join(directory, 'calls');
+    const discoveryCwd = join(directory, 'discovery-cwd');
     const config = join(directory, 'claude-config');
     const sessions = join(config, 'sessions');
     const sockets = join(directory, 'sockets');
@@ -87,6 +88,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
     });
     chmodSync(socket, 0o600);
     process.env.REPOQ_CAPTURE = capture;
+    process.env.REPOQ_DISCOVERY_CWD = discoveryCwd;
     process.env.CLAUDE_CONFIG_DIR = config;
     writeFileSync(join(sessions, `${process.pid}.json`), JSON.stringify({
       pid: process.pid,
@@ -102,6 +104,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       const args = process.argv.slice(2);
       fs.appendFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(args) + '\\n');
       if (args[0] === 'agents') {
+        fs.writeFileSync(process.env.REPOQ_DISCOVERY_CWD, process.cwd());
         process.stdout.write(JSON.stringify([{ sessionId: '${task}', pid: ${process.pid}, cwd: ${JSON.stringify(tmpdir())} }]));
       } else {
         const useId = 'toolu_fixture';
@@ -119,6 +122,8 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       const calls: unknown[] = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       assert.equal(calls.length, 2);
       assert.deepEqual(calls[0], ['agents', '--json']);
+      assert.equal(readFileSync(discoveryCwd, 'utf8'), realpathSync(tmpdir()));
+      assert.notEqual(realpathSync(process.cwd()), realpathSync(tmpdir()));
       const sender = calls[1];
       assert.ok(Array.isArray(sender));
       assert.deepEqual(sender.slice(0, 13), [
@@ -132,6 +137,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       assert.match(prompt, /SendMessage exactly once/);
     } finally {
       delete process.env.REPOQ_CAPTURE;
+      delete process.env.REPOQ_DISCOVERY_CWD;
       delete process.env.CLAUDE_CONFIG_DIR;
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

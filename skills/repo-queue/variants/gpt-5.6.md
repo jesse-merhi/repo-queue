@@ -19,7 +19,7 @@ If registration returns `waiting` or `reserved`, save the returned entry ID and 
 On the first wake, run its exact `claim` command before merge work and retain the successful result in the task checkpoint. A claim succeeds only once. After compaction, a resumed turn, or a repeated wake, do not claim an already-owned entry again. Confirm the existing claim using the current conversation's actual identity and original worktree:
 
 ```sh
-repo-queue verify-claim <entry-id> --token <token> \
+repo-queue verify-claim <entry-id> --token=<token> \
   --agent <codex-or-claude> --task <current-conversation-uuid> --cwd <original-worktree>
 ```
 
@@ -27,4 +27,4 @@ This read-only check succeeds only for the matching owner, token and claimed sta
 
 After the workflow succeeds and associated remote work has finished, run the wake message's `done` command. If blocked, run its `block` command with a concrete reason, explain what is needed and end the turn. A blocked entry retains the repository reservation.
 
-For delivery failure before claim, inspect `repo-queue status` and use `retry <id> --token <token>` after resolving the cause. Retry returns a replacement token. If the owner was interrupted after claim or blocked, establish that the old owner and its remote jobs have stopped before `recover <id> --token <token> --quiescent`. This also applies when this conversation returns to its own blocked entry after its blocker is resolved: first confirm the previous workflow and remote jobs have stopped. Recovery invalidates the old token and sends a new wake. Save the replacement entry/token and end the turn; wait for that wake instead of claiming immediately. Never claim twice, release a turn because time passed, or report completion while remote work may still be running.
+For delivery failure before claim, inspect `repo-queue status` and use `retry <id> --token=<token>` after resolving the cause. Retry returns a replacement token. If the owner was interrupted after claim or blocked, establish that the old owner and its remote jobs have stopped before `recover <id> --token=<token> --quiescent`. This also applies when this conversation returns to its own blocked entry after its blocker is resolved: first confirm the previous workflow and remote jobs have stopped. Recovery invalidates the old token and sends a new wake. After retry or recovery, save the replacement entry/token and end the turn; wait for that wake instead of claiming immediately. Never claim twice, release a turn because time passed, or report completion while remote work may still be running.

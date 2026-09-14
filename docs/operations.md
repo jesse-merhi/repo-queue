@@ -11,15 +11,15 @@ A successful notification means the adapter accepted a queued message, completed
 If the original conversation already claimed its turn and lost its checkpoint after compaction, verify that existing claim instead of claiming again:
 
 ```sh
-repo-queue verify-claim ENTRY_ID --token TOKEN \
+repo-queue verify-claim ENTRY_ID --token=TOKEN \
   --agent codex --task CURRENT_CONVERSATION_UUID --cwd /original/worktree
 ```
 
 Use the actual current conversation identity (`--agent claude` for Claude). The read-only command succeeds only for the matching owner, token and claimed state. Continue the saved workflow and account for jobs already running. A duplicate wake does not cancel an existing claim. A blocked entry still needs explicit recovery; verification does not unblock it.
 
-Resolve authentication, missing executables, moved directories or incompatible native Claude messaging, then use `retry ID --token TOKEN`. For a live Claude session, inspect its inbound-message notices: it may hold or refuse messages from the sender's normal configured permission mode. Do not change global settings, terminate the session or repeatedly retry to force delivery. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
+Resolve authentication, missing executables, moved directories or incompatible native Claude messaging, then use `retry ID --token=TOKEN`. For a live Claude session, inspect its inbound-message notices: it may hold or refuse messages from the sender's normal configured permission mode. Do not change global settings, terminate the session or repeatedly retry to force delivery. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
 
-When the owner has already claimed or blocked, use `recover ID --token TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.
+When the owner has already claimed or blocked, use `recover ID --token=TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.
 
 If an agent is waiting for a human approval, it should `block` with a reason and end its turn. The queue does not grant approval or decide that the work is finished.
 

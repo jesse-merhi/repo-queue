@@ -42,9 +42,9 @@ repo-queue status
 The agent saves the returned entry ID and token, then ends its turn. The dispatcher sends the original conversation a message containing concrete commands:
 
 ```sh
-repo-queue claim ENTRY_ID --token TOKEN
+repo-queue claim ENTRY_ID --token=TOKEN
 # Run the existing authorized merge workflow.
-repo-queue done ENTRY_ID --token TOKEN
+repo-queue done ENTRY_ID --token=TOKEN
 ```
 
 A claim succeeds once. Duplicate or stale notifications cannot start a second owner. Completion moves the next PR forward. Queue membership grants no new merge, publication or CI-spending authority.
@@ -54,9 +54,9 @@ After compaction or a resumed conversation, `verify-claim` confirms an existing 
 ## When work stops
 
 ```sh
-repo-queue block ENTRY_ID --token TOKEN --reason 'Waiting for approval'
-repo-queue retry ENTRY_ID --token TOKEN
-repo-queue recover ENTRY_ID --token TOKEN --quiescent
+repo-queue block ENTRY_ID --token=TOKEN --reason 'Waiting for approval'
+repo-queue retry ENTRY_ID --token=TOKEN
+repo-queue recover ENTRY_ID --token=TOKEN --quiescent
 ```
 
 Blocking retains the turn. Use `retry` after fixing a notification failure before claim. Use `recover` only after confirming that the old owner and its remote jobs have stopped. Both replace the token, so delayed messages cannot take over using an old token. Nothing releases a reservation merely because time passed.

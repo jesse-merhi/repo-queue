@@ -143,6 +143,7 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
     }
 
     const active = await run('claude', ['agents', '--json'], {
+      cwd: entry.cwd,
       timeoutMs: 30_000,
       ...(releaseSignal === undefined ? {} : { releaseSignal }),
       label: 'Claude active-session check',
