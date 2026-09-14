@@ -480,8 +480,8 @@ test('delivery is globally bounded and serialized per owning session', async () 
     await command(state, ['stop'], environment);
     await command(state, ['start'], environment);
     assert.ok(retriedWhileLive?.token);
-    await command(state, ['recover', recoveredWhileLive.id, '--token', recoveredWhileLive.token ?? '', '--quiescent'], environment);
-    await command(state, ['retry', retriedWhileLive.id, '--token', retriedWhileLive.token], environment);
+    await command(state, ['recover', recoveredWhileLive.id, `--token=${recoveredWhileLive.token ?? ''}`, '--quiescent'], environment);
+    await command(state, ['retry', retriedWhileLive.id, `--token=${retriedWhileLive.token}`], environment);
     await delay(1_250);
     assert.equal(readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length, 4);
 
