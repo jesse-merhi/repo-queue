@@ -171,7 +171,7 @@ test('CLI verifies the original owner after a successful single-use claim', () =
       '--agent', 'claude', '--task', task, '--cwd', directory,
     ]);
     assert.equal(wrongOwner.status, 1);
-    assert.match(wrongOwner.stderr, /different agent, task, or cwd/);
+    assert.match(wrongOwner.stderr, /different agent, task, cwd, or configuration root/);
 
     const wrongToken = run([
       '--state', state, 'verify-claim', claimed.id, '--token', 'stale-token',

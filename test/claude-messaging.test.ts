@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import test from "node:test";
 
 import {
@@ -98,8 +98,8 @@ test("resolves one exact live Claude UUID and working directory to its private U
   const sockets = join(root, "sockets");
   mkdirSync(sessions, { mode: 0o700 });
   mkdirSync(sockets, { mode: 0o700 });
-  const socket = join(sockets, "target.sock");
-  const server = createServer();
+  const socket = join(sockets, "target%20.sock");
+  const server = createServer((connection) => connection.end());
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socket, resolve);
@@ -116,7 +116,17 @@ test("resolves one exact live Claude UUID and working directory to its private U
       pidDomain: pidDomain(),
     }), { mode: 0o600 });
     const agents = JSON.stringify([{ sessionId: task, pid: process.pid, cwd: root }]);
-    assert.equal(resolveClaudeLiveAddress(entry(root), agents, sessions), `uds:${socket}`);
+    const address = resolveClaudeLiveAddress(entry(root), agents, sessions);
+    assert.ok(address);
+    assert.ok(address.startsWith("uds:"));
+    // Claude's native uds parser decodes the address before connecting.
+    const destination = decodeURIComponent(address.slice(4));
+    assert.equal(destination, socket);
+    await new Promise<void>((resolve, reject) => {
+      const connection = createConnection(destination);
+      connection.once("error", reject);
+      connection.once("connect", () => { connection.end(); resolve(); });
+    });
     assert.equal(resolveClaudeLiveAddress(entry(root), "[]", sessions), undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

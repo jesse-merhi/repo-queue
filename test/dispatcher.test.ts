@@ -45,7 +45,14 @@ async function command(state: string, args: readonly string[], environment: Node
   return JSON.parse(result.stdout);
 }
 
-function add(state: string, root: string, number: number, task: string, agent: Agent = 'codex'): Entry {
+function add(
+  state: string,
+  root: string,
+  number: number,
+  task: string,
+  agent: Agent = 'codex',
+  ownerConfigRoot?: string,
+): Entry {
   const store = new Store(state);
   try {
     return store.add({
@@ -53,6 +60,7 @@ function add(state: string, root: string, number: number, task: string, agent: A
       agent,
       task,
       cwd: root,
+      ...(ownerConfigRoot === undefined ? {} : { owner_config_root: ownerConfigRoot }),
     });
   } finally {
     store.close();
@@ -302,27 +310,41 @@ test('delivery failures retain the reservation, redact the token, and require ex
   await fixture(async (root, state, environment) => {
     const fail = join(root, 'fail');
     const messages = join(root, 'messages');
+    const configs = join(root, 'configs');
+    const ownerConfig = join(root, 'owner-codex');
+    const dispatcherConfig = join(root, 'dispatcher-codex');
+    const dispatcherEnvironment = { ...environment, CODEX_HOME: dispatcherConfig };
     writeFileSync(fail, '');
     writeFileSync(messages, '');
+    writeFileSync(configs, '');
     executable(root, 'codex', `
       const fs = require('node:fs');
       const message = process.argv.at(-1);
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/configs', process.env.CODEX_HOME + '\\n');
       if (fs.existsSync(process.env.REPOQ_FIXTURE + '/fail')) {
         process.stderr.write('failed token from message: ' + message);
         process.exit(7);
       }
       fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', message + '\\n');
     `);
-    const first = add(state, root, 10, '10000000-0000-4000-8000-000000000010');
+    const first = add(
+      state,
+      root,
+      10,
+      '10000000-0000-4000-8000-000000000010',
+      'codex',
+      ownerConfig,
+    );
     const queue = new Store(state);
     const second = queue.add({
       url: 'https://github.com/fixture/repository-10/pull/11',
       agent: 'codex',
       task: '10000000-0000-4000-8000-000000000011',
       cwd: root,
+      owner_config_root: ownerConfig,
     });
     queue.close();
-    await command(state, ['start'], environment);
+    await command(state, ['start'], dispatcherEnvironment);
 
     await until(() => {
       const probe = new Store(state);
@@ -332,8 +354,10 @@ test('delivery failures retain the reservation, redact the token, and require ex
     const failed = probe.list();
     probe.close();
     assert.equal(failed[0]?.state, 'reserved');
+    assert.equal(failed[0]?.token, first.token);
     assert.equal(failed[1]?.state, 'waiting');
     assert.doesNotMatch(failed[0]?.delivery_error ?? '', new RegExp(first.token ?? 'never'));
+    assert.deepEqual(readFileSync(configs, 'utf8').trim().split('\n'), [ownerConfig]);
 
     unlinkSync(fail);
     const retry = new Store(state);
@@ -341,6 +365,7 @@ test('delivery failures retain the reservation, redact the token, and require ex
     retry.close();
     assert.notEqual(replacement.token, first.token);
     await until(() => readFileSync(messages, 'utf8').includes(replacement.token ?? 'missing-token'), 'retried wake');
+    assert.deepEqual(readFileSync(configs, 'utf8').trim().split('\n'), [ownerConfig, ownerConfig]);
     const final = new Store(state);
     assert.equal(final.list().find((entry) => entry.id === second.id)?.state, 'waiting');
     final.close();

@@ -44,6 +44,8 @@ repo-queue stop
 
 State defaults to `~/.local/state/repo-queue`. Set `REPO_QUEUE_STATE` or pass `--state` for another location. All participants must use the same directory. Keep it on a local filesystem, never a network share. It contains conversation IDs, paths, PR URLs and tokens; do not commit or share it.
 
+Register each PR from its original harness environment. New entries retain that owner's configuration directory (`CODEX_HOME` or `CLAUDE_CONFIG_DIR`, including the default when unset). Relative roots resolve against the original worktree. One dispatcher can serve separate harness installations. Delivery uses the saved directory for the matching agent; it does not copy credentials or change global settings. Existing Python entries lack this metadata and continue using the dispatcher's configuration until completed.
+
 ## Upgrade from the Python preview
 
 The TypeScript version reads the existing SQLite entries without changing IDs, order or tokens. Its dispatcher lock differs, so never run both dispatchers on one state directory.

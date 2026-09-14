@@ -32,6 +32,7 @@ export interface Entry {
   agent: Agent;
   task: string;
   cwd: string;
+  owner_config_root?: string;
   state: QueueState;
   token: string | null;
   block_reason: string;
@@ -46,4 +47,5 @@ export interface AddEntryInput {
   agent: Agent;
   task: string;
   cwd: string;
+  owner_config_root?: string;
 }

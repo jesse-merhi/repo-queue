@@ -38,6 +38,7 @@ async function run(
     readonly timeoutMs?: number;
     readonly releaseSignal?: AbortSignal;
     readonly lifecycle?: DeliveryProcessLifecycle;
+    readonly env?: NodeJS.ProcessEnv;
     readonly label: string;
   },
 ): Promise<CommandResult> {
@@ -46,6 +47,7 @@ async function run(
     const child = spawn(command, args, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(options.timeoutMs) }),
+      ...(options.env === undefined ? {} : { env: options.env }),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -141,6 +143,12 @@ function redact(error: unknown, token: string | null): Error {
   return new Error(safe);
 }
 
+function ownerEnvironment(entry: Readonly<Entry>): NodeJS.ProcessEnv | undefined {
+  if (entry.owner_config_root === undefined) return undefined;
+  const variable = entry.agent === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
+  return { ...process.env, [variable]: entry.owner_config_root };
+}
+
 /** Deliver one wake message. CLI acceptance is distinct from the owner's durable claim. */
 export async function deliver(
   entry: Entry,
@@ -149,6 +157,7 @@ export async function deliver(
   lifecycle?: DeliveryProcessLifecycle,
 ): Promise<void> {
   try {
+    const env = ownerEnvironment(entry);
     if (entry.agent === 'codex') {
       await run(
         'codex',
@@ -156,6 +165,7 @@ export async function deliver(
         {
           cwd: entry.cwd,
           timeoutMs: 60_000,
+          ...(env === undefined ? {} : { env }),
           ...(releaseSignal === undefined ? {} : { releaseSignal }),
           ...(lifecycle === undefined ? {} : { lifecycle }),
           label: 'Codex queue delivery',
@@ -167,6 +177,7 @@ export async function deliver(
     const active = await run('claude', ['agents', '--json'], {
       cwd: entry.cwd,
       timeoutMs: 30_000,
+      ...(env === undefined ? {} : { env }),
       ...(releaseSignal === undefined ? {} : { releaseSignal }),
       ...(lifecycle === undefined ? {} : { lifecycle }),
       label: 'Claude active-session check',
@@ -184,6 +195,7 @@ export async function deliver(
         {
           cwd: entry.cwd,
           timeoutMs: 120_000,
+          ...(env === undefined ? {} : { env }),
           ...(releaseSignal === undefined ? {} : { releaseSignal }),
           ...(lifecycle === undefined ? {} : { lifecycle }),
           label: 'Claude native sender',
@@ -200,6 +212,7 @@ export async function deliver(
       ],
       {
         cwd: entry.cwd,
+        ...(env === undefined ? {} : { env }),
         ...(releaseSignal === undefined ? {} : { releaseSignal }),
         ...(lifecycle === undefined ? {} : { lifecycle }),
         label: 'Claude resume delivery',

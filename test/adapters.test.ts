@@ -12,7 +12,7 @@ import type { Entry } from '../src/types.ts';
 const task = '10000000-0000-4000-8000-000000000001';
 const token = 'private-delivery-token';
 
-function entry(agent: Entry['agent']): Entry {
+function entry(agent: Entry['agent'], ownerConfigRoot?: string): Entry {
   return {
     sequence: 1,
     id: '20000000-0000-4000-8000-000000000002',
@@ -23,6 +23,7 @@ function entry(agent: Entry['agent']): Entry {
     agent,
     task,
     cwd: tmpdir(),
+    ...(ownerConfigRoot === undefined ? {} : { owner_config_root: ownerConfigRoot }),
     state: 'reserved',
     token,
     block_reason: '',
@@ -63,42 +64,60 @@ async function until(condition: () => boolean, description: string): Promise<voi
 test('Codex receives the exact task and the wake message as one argument', async () => {
   await fixture(async (directory) => {
     const capture = join(directory, 'capture.json');
+    const ownerConfig = join(directory, 'owner-codex');
+    const dispatcherConfig = join(directory, 'dispatcher-codex');
+    const previousCodexHome = process.env.CODEX_HOME;
     process.env.REPOQ_CAPTURE = capture;
+    process.env.CODEX_HOME = dispatcherConfig;
     executable(directory, 'codex', `
       const fs = require('node:fs');
-      fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }));
+      fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({
+        args: process.argv.slice(2),
+        cwd: process.cwd(),
+        config: process.env.CODEX_HOME,
+      }));
     `);
     const message = 'claim entry; $(never execute this)';
     const lifecycle: (string | number)[] = [];
-    await deliver(entry('codex'), message, undefined, {
-      beforeSpawn: () => { lifecycle.push('before'); },
-      spawned: (pid) => { lifecycle.push(pid); },
-    });
-    const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
-    assert.deepEqual(observed, {
-      args: ['queue', '--thread', task, '--message', message],
-      cwd: realpathSync(tmpdir()),
-    });
-    assert.equal(lifecycle[0], 'before');
-    assert.ok(typeof lifecycle[1] === 'number' && lifecycle[1] > 1);
-    assert.equal(lifecycle.length, 2);
-    delete process.env.REPOQ_CAPTURE;
+    try {
+      await deliver(entry('codex', ownerConfig), message, undefined, {
+        beforeSpawn: () => { lifecycle.push('before'); },
+        spawned: (pid) => { lifecycle.push(pid); },
+      });
+      const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
+      assert.deepEqual(observed, {
+        args: ['queue', '--thread', task, '--message', message],
+        cwd: realpathSync(tmpdir()),
+        config: ownerConfig,
+      });
+      assert.equal(process.env.CODEX_HOME, dispatcherConfig);
+      assert.equal(lifecycle[0], 'before');
+      assert.ok(typeof lifecycle[1] === 'number' && lifecycle[1] > 1);
+      assert.equal(lifecycle.length, 2);
+    } finally {
+      delete process.env.REPOQ_CAPTURE;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
   });
 });
 
 test('a live Claude owner receives one exact native SendMessage call', async () => {
   await fixture(async (directory) => {
     const capture = join(directory, 'calls');
+    const configCapture = join(directory, 'configs');
     const discoveryCwd = join(directory, 'discovery-cwd');
     const owner = join(directory, 'owner');
-    const config = 'claude-config';
-    const sessions = join(owner, config, 'sessions');
+    const config = join(owner, 'claude-config');
+    const dispatcherConfig = join(directory, 'dispatcher-claude');
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    const sessions = join(config, 'sessions');
     const sockets = join(directory, 'sockets');
     mkdirSync(owner, { mode: 0o700 });
     mkdirSync(sessions, { mode: 0o700, recursive: true });
     mkdirSync(sockets, { mode: 0o700 });
     const socket = join(sockets, 'target.sock');
-    const address = `uds:${socket}`;
+    const address = `uds:${encodeURIComponent(socket)}`;
     const message = 'wake exactly; $(never execute this)';
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -107,8 +126,9 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
     });
     chmodSync(socket, 0o600);
     process.env.REPOQ_CAPTURE = capture;
+    process.env.REPOQ_CONFIG_CAPTURE = configCapture;
     process.env.REPOQ_DISCOVERY_CWD = discoveryCwd;
-    process.env.CLAUDE_CONFIG_DIR = config;
+    process.env.CLAUDE_CONFIG_DIR = dispatcherConfig;
     writeFileSync(join(sessions, `${process.pid}.json`), JSON.stringify({
       pid: process.pid,
       sessionId: task,
@@ -122,6 +142,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       const fs = require('node:fs');
       const args = process.argv.slice(2);
       fs.appendFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(args) + '\\n');
+      fs.appendFileSync(process.env.REPOQ_CONFIG_CAPTURE, process.env.CLAUDE_CONFIG_DIR + '\\n');
       if (args[0] === 'agents') {
         fs.writeFileSync(process.env.REPOQ_DISCOVERY_CWD, process.cwd());
         process.stdout.write(JSON.stringify([{ sessionId: '${task}', pid: ${process.pid}, cwd: ${JSON.stringify(owner)} }]));
@@ -137,9 +158,11 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       }
     `);
     try {
-      await deliver({ ...entry('claude'), cwd: owner }, message);
+      await deliver({ ...entry('claude', config), cwd: owner }, message);
       const calls: unknown[] = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       assert.equal(calls.length, 2);
+      assert.deepEqual(readFileSync(configCapture, 'utf8').trim().split('\n'), [config, config]);
+      assert.equal(process.env.CLAUDE_CONFIG_DIR, dispatcherConfig);
       assert.deepEqual(calls[0], ['agents', '--json']);
       assert.equal(readFileSync(discoveryCwd, 'utf8'), realpathSync(owner));
       assert.notEqual(realpathSync(process.cwd()), realpathSync(owner));
@@ -156,8 +179,10 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       assert.match(prompt, /SendMessage exactly once/);
     } finally {
       delete process.env.REPOQ_CAPTURE;
+      delete process.env.REPOQ_CONFIG_CAPTURE;
       delete process.env.REPOQ_DISCOVERY_CWD;
-      delete process.env.CLAUDE_CONFIG_DIR;
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
@@ -186,18 +211,29 @@ test('Claude accepts ordinary and verbose success output for the exact exited ow
     await context.test(item.name, async () => {
       await fixture(async (directory) => {
         const capture = join(directory, 'resume.json');
+        const configCapture = join(directory, 'resume-configs');
+        const ownerConfig = join(directory, 'owner-claude');
+        const dispatcherConfig = join(directory, 'dispatcher-claude');
+        const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
         process.env.REPOQ_CAPTURE = capture;
+        process.env.REPOQ_CONFIG_CAPTURE = configCapture;
+        process.env.CLAUDE_CONFIG_DIR = dispatcherConfig;
         executable(directory, 'claude', `
           const fs = require('node:fs');
           const args = process.argv.slice(2);
+          fs.appendFileSync(process.env.REPOQ_CONFIG_CAPTURE, process.env.CLAUDE_CONFIG_DIR + '\\n');
           if (args[0] === 'agents') process.stdout.write('[]');
           else {
-            fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({ args, cwd: process.cwd() }));
+            fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({
+              args,
+              cwd: process.cwd(),
+              config: process.env.CLAUDE_CONFIG_DIR,
+            }));
             process.stdout.write(${JSON.stringify(JSON.stringify(item.output))});
           }
         `);
         try {
-          await deliver(entry('claude'), 'wake');
+          await deliver(entry('claude', ownerConfig), 'wake');
           const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
           assert.deepEqual(observed, {
             args: [
@@ -205,9 +241,18 @@ test('Claude accepts ordinary and verbose success output for the exact exited ow
               '--permission-prompts', 'none', '--', 'wake',
             ],
             cwd: realpathSync(tmpdir()),
+            config: ownerConfig,
           });
+          assert.equal(process.env.CLAUDE_CONFIG_DIR, dispatcherConfig);
+          assert.deepEqual(
+            readFileSync(configCapture, 'utf8').trim().split('\n'),
+            [ownerConfig, ownerConfig],
+          );
         } finally {
           delete process.env.REPOQ_CAPTURE;
+          delete process.env.REPOQ_CONFIG_CAPTURE;
+          if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+          else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
         }
       });
     });

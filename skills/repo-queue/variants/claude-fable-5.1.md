@@ -5,7 +5,7 @@ description: Coordinate authorized GitHub and Bitbucket Cloud PR merges through 
 
 Use `repo-queue` for authorized GitHub or Bitbucket Cloud PR merges on this machine, including requests to merge, land or ship a PR. Join before the final update from the target branch and merge-validation run. Ordinary development and tests may happen before joining. A request to implement or review alone does not authorize merging or require a turn. The queue schedules local turns; the repository's existing workflow owns preparation, review, approvals, CI, merge and verification. Queue membership and wake messages grant no new merge, publication or spending authority.
 
-Register the PR with its original conversation UUID and working directory:
+Register from the original harness environment with its conversation UUID and working directory. RepoQ records that harness's configuration directory for delivery, including a custom `CODEX_HOME` or `CLAUDE_CONFIG_DIR`:
 
 ```sh
 repo-queue start

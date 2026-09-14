@@ -11,6 +11,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
+import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -135,6 +136,7 @@ function parseStoredEntry(value: unknown): Entry {
   const agent = storedString(row, "agent", 16);
   const task = storedString(row, "task", MAX_TASK_LENGTH);
   const cwd = storedString(row, "cwd", MAX_PATH_LENGTH);
+  const ownerConfigValue = row.owner_config_root;
   const state = storedString(row, "state", 16);
   const storedToken = row.token;
   const blockReason = storedString(row, "block_reason", MAX_MESSAGE_LENGTH, true);
@@ -173,6 +175,18 @@ function parseStoredEntry(value: unknown): Entry {
   if (!isAbsolute(cwd)) {
     throw new InvalidStoredEntryError("stored queue entry has a non-absolute cwd");
   }
+  if (
+    ownerConfigValue !== undefined &&
+    ownerConfigValue !== null &&
+    (typeof ownerConfigValue !== "string" ||
+      ownerConfigValue.length === 0 ||
+      ownerConfigValue.length > MAX_PATH_LENGTH ||
+      !isAbsolute(ownerConfigValue))
+  ) {
+    throw new InvalidStoredEntryError(
+      "stored queue entry has an invalid owner configuration root",
+    );
+  }
   let parsed: PullRequest;
   try {
     parsed = pullRequest(url);
@@ -204,6 +218,9 @@ function parseStoredEntry(value: unknown): Entry {
     agent,
     task,
     cwd,
+    ...(typeof ownerConfigValue === "string"
+      ? { owner_config_root: ownerConfigValue }
+      : {}),
     state,
     token: storedToken,
     block_reason: blockReason,
@@ -229,6 +246,37 @@ function boundedString(
     throw new TypeError(`${name} must be ${description}`);
   }
   return value;
+}
+
+function configEnvironmentVariable(agent: Entry["agent"]): "CODEX_HOME" | "CLAUDE_CONFIG_DIR" {
+  return agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR";
+}
+
+type OwnerConfigInput = Pick<
+  AddEntryInput,
+  "agent" | "cwd" | "owner_config_root"
+>;
+
+function ownerConfigRoot(input: Readonly<OwnerConfigInput>, cwd: string): string {
+  if (input.owner_config_root !== undefined) {
+    const supplied = boundedString(
+      input.owner_config_root,
+      "owner configuration root",
+      MAX_PATH_LENGTH,
+    );
+    if (!isAbsolute(supplied)) {
+      throw new TypeError("owner configuration root must be absolute");
+    }
+    return supplied;
+  }
+  const configured = process.env[configEnvironmentVariable(input.agent)];
+  if (configured !== undefined && configured.length > 0) {
+    return resolve(
+      cwd,
+      boundedString(configured, "owner configuration root", MAX_PATH_LENGTH),
+    );
+  }
+  return join(homedir(), input.agent === "codex" ? ".codex" : ".claude");
 }
 
 function pullRequest(input: unknown): PullRequest {
@@ -366,18 +414,29 @@ export class Store {
     if (!cwdStatus.isDirectory()) {
       throw new TypeError("cwd must be a directory");
     }
+    const configRoot = ownerConfigRoot(input, realpathSync(cwd));
 
     return this.write(() => {
       const existing = this.database
-        .prepare("SELECT * FROM entries WHERE repo = ? AND pr_number = ?")
+        .prepare(`
+          SELECT entries.*, owner_configs.config_root AS owner_config_root
+          FROM entries
+          LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+          WHERE entries.repo = ? AND entries.pr_number = ?
+        `)
         .get(parsed.repo, parsed.prNumber);
       if (existing !== undefined) {
         const entry = parseStoredEntry(existing);
-        if (entry.agent === input.agent && entry.task === task && entry.cwd === cwd) {
+        if (
+          entry.agent === input.agent &&
+          entry.task === task &&
+          entry.cwd === cwd &&
+          (entry.owner_config_root === undefined || entry.owner_config_root === configRoot)
+        ) {
           return entry;
         }
         throw new ConflictError(
-          "pull request is already registered to a different agent, task, or cwd",
+          "pull request is already registered to a different agent, task, cwd, or configuration root",
         );
       }
 
@@ -402,13 +461,21 @@ export class Store {
         timestamp,
         timestamp,
       );
+      this.database.prepare(`
+        INSERT INTO owner_configs (entry_id, config_root) VALUES (?, ?)
+      `).run(id, configRoot);
       return this.updated(id);
     });
   }
 
   list(): Entry[] {
     return this.database
-      .prepare("SELECT * FROM entries ORDER BY sequence")
+      .prepare(`
+        SELECT entries.*, owner_configs.config_root AS owner_config_root
+        FROM entries
+        LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+        ORDER BY entries.sequence
+      `)
       .all()
       .map((row) => parseStoredEntry(row));
   }
@@ -465,7 +532,7 @@ export class Store {
   verifyClaim(
     id: string,
     suppliedToken: string,
-    owner: Readonly<Pick<AddEntryInput, "agent" | "task" | "cwd">>,
+    owner: Readonly<Pick<AddEntryInput, "agent" | "task" | "cwd" | "owner_config_root">>,
   ): Entry {
     const entry = this.owned(id, suppliedToken);
     if (entry.state !== "claimed") {
@@ -492,13 +559,15 @@ export class Store {
     } catch {
       throw new OwnershipError("queue entry owner cwd is unavailable");
     }
+    const configRoot = ownerConfigRoot(owner, ownerCwd);
     if (
       entry.agent !== owner.agent ||
       entry.task !== task ||
-      entryCwd !== ownerCwd
+      entryCwd !== ownerCwd ||
+      (entry.owner_config_root !== undefined && entry.owner_config_root !== configRoot)
     ) {
       throw new OwnershipError(
-        "queue entry is claimed by a different agent, task, or cwd",
+        "queue entry is claimed by a different agent, task, cwd, or configuration root",
       );
     }
     return entry;
@@ -578,9 +647,11 @@ export class Store {
 
   pendingNotifications(): Entry[] {
     return this.database.prepare(`
-      SELECT * FROM entries
-      WHERE state = 'reserved' AND delivery_status = 'pending'
-      ORDER BY sequence
+      SELECT entries.*, owner_configs.config_root AS owner_config_root
+      FROM entries
+      LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+      WHERE entries.state = 'reserved' AND entries.delivery_status = 'pending'
+      ORDER BY entries.sequence
     `).all().map((row) => parseStoredEntry(row));
   }
 
@@ -680,6 +751,10 @@ export class Store {
         );
         CREATE INDEX IF NOT EXISTS entries_repo_state_sequence
           ON entries (repo, state, sequence);
+        CREATE TABLE IF NOT EXISTS owner_configs (
+          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+          config_root TEXT NOT NULL
+        );
       `);
       if (versionValue < SCHEMA_VERSION) {
         this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -704,7 +779,12 @@ export class Store {
   private find(id: string): Entry | undefined {
     const validatedId = boundedString(id, "entry id", MAX_TASK_LENGTH);
     const row = this.database
-      .prepare("SELECT * FROM entries WHERE id = ?")
+      .prepare(`
+        SELECT entries.*, owner_configs.config_root AS owner_config_root
+        FROM entries
+        LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+        WHERE entries.id = ?
+      `)
       .get(validatedId);
     return row === undefined ? undefined : parseStoredEntry(row);
   }

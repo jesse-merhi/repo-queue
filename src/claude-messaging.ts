@@ -170,7 +170,11 @@ function assertSocket(path: string, userId: number): void {
   }
 }
 
-export function claudeSessionsDirectory(ownerDirectory = process.cwd()): string {
+export function claudeSessionsDirectory(
+  ownerDirectory = process.cwd(),
+  savedConfigRoot?: string,
+): string {
+  if (savedConfigRoot !== undefined) return join(savedConfigRoot, "sessions");
   const configured = process.env.CLAUDE_CONFIG_DIR;
   const configDirectory = configured?.trim()
     ? resolve(ownerDirectory, configured)
@@ -209,7 +213,7 @@ export function parseClaudeAgents(output: string): readonly ClaudeActiveSession[
 export function resolveClaudeLiveAddress(
   entry: Readonly<Entry>,
   agentsOutput: string,
-  sessionsDirectory = claudeSessionsDirectory(entry.cwd),
+  sessionsDirectory = claudeSessionsDirectory(entry.cwd, entry.owner_config_root),
 ): string | undefined {
   const matches = parseClaudeAgents(agentsOutput)
     .filter((session) => session.sessionId === entry.task);
@@ -240,7 +244,7 @@ export function resolveClaudeLiveAddress(
   verifyClaudePidDomain(session.pidDomain);
   assertProcessIsAlive(session.pid);
   assertSocket(session.messagingSocketPath, userId);
-  return `uds:${session.messagingSocketPath}`;
+  return `uds:${encodeURIComponent(session.messagingSocketPath)}`;
 }
 
 export function claudeSenderPrompt(address: string, message: string): string {
