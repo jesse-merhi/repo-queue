@@ -15,13 +15,13 @@ import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { deliver } from './adapters.ts';
+import { DeliveryLedger, type DeliveryAttempt } from './delivery-ledger.ts';
 import { Store } from './store.ts';
 import type { Entry } from './types.ts';
 
 const daemonDatabase = 'daemon.sqlite3';
 const legacyLock = 'dispatcher.lock';
 const stopRequest = 'stop';
-const deliveryLimit = 4;
 const daemonAcquireDeadlineMs = 2_000;
 const daemonStopDeadlineMs = 5_000;
 const internalStopGeneration = 'REPOQ_INTERNAL_STOP_GENERATION';
@@ -212,11 +212,20 @@ function safeError(error: unknown, token: string | null): string {
   return redacted.slice(0, 4_096);
 }
 
-async function sendEntry(entry: Entry, state: string, releaseSignal: AbortSignal): Promise<void> {
+async function sendEntry(
+  entry: Entry,
+  state: string,
+  releaseSignal: AbortSignal,
+  ledger: DeliveryLedger,
+  attempt: DeliveryAttempt,
+): Promise<void> {
   const store = new Store(state);
   try {
     try {
-      await deliver(entry, wakeMessage(entry, state), releaseSignal);
+      await deliver(entry, wakeMessage(entry, state), releaseSignal, {
+        beforeSpawn: () => { ledger.beforeSpawn(attempt); },
+        spawned: (pid) => { ledger.spawned(attempt, pid); },
+      });
       store.delivery(entry.id, entry.token ?? '', true, '');
     } catch (error) {
       store.delivery(entry.id, entry.token ?? '', false, safeError(error, entry.token));
@@ -238,27 +247,58 @@ export async function serve(state: string): Promise<void> {
   if (!lease) return;
 
   const store = new Store(stateDirectory);
+  const admissionLedger = new DeliveryLedger(stateDirectory);
   const activeOwners = new Map<string, Promise<void>>();
   const deliveryLifecycle = new AbortController();
   try {
     store.markUncertain();
     while (!stopped()) {
+      admissionLedger.reconcile();
       store.reserve();
       for (const entry of store.pendingNotifications()) {
-        if (activeOwners.size >= deliveryLimit) break;
         const owner = `${entry.agent}\0${entry.task}`;
-        if (activeOwners.has(owner) || !entry.token || !store.beginDelivery(entry.id, entry.token)) continue;
-        const task = sendEntry(entry, stateDirectory, deliveryLifecycle.signal)
+        if (activeOwners.has(owner) || !entry.token) continue;
+        const attempt = admissionLedger.admit(entry, process.pid);
+        if (attempt === undefined) continue;
+        let attemptLedger: DeliveryLedger;
+        try {
+          attemptLedger = new DeliveryLedger(stateDirectory);
+        } catch (error) {
+          admissionLedger.release(attempt);
+          throw error;
+        }
+        let deliveryStarted: boolean;
+        try {
+          deliveryStarted = store.beginDelivery(entry.id, entry.token);
+        } catch (error) {
+          try { attemptLedger.release(attempt); } finally { attemptLedger.close(); }
+          throw error;
+        }
+        if (!deliveryStarted) {
+          try { attemptLedger.release(attempt); } finally { attemptLedger.close(); }
+          continue;
+        }
+        const task = sendEntry(entry, stateDirectory, deliveryLifecycle.signal, attemptLedger, attempt)
           .catch((error: unknown) => {
             process.stderr.write(`repo-queue: delivery bookkeeping failed: ${safeError(error, entry.token)}\n`);
           })
-          .finally(() => { activeOwners.delete(owner); });
+          .finally(() => {
+            try {
+              attemptLedger.release(attempt);
+            } catch (error) {
+              process.stderr.write(`repo-queue: delivery ledger release failed: ${safeError(error, entry.token)}\n`);
+            } finally {
+              attemptLedger.close();
+              activeOwners.delete(owner);
+            }
+          });
         activeOwners.set(owner, task);
       }
       await delay(1_000);
     }
   } finally {
     deliveryLifecycle.abort();
+    admissionLedger.close();
     store.close();
     release(lease);
   }

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { Store } from './store.ts';
+import { DeliveryLedger } from './delivery-ledger.ts';
 import { running, serve, start, stop } from './dispatcher.ts';
 import type { Agent } from './types.ts';
 
@@ -24,6 +25,8 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
   retry ID --token=TOKEN          Redeliver an unclaimed turn; replace token
   recover ID --token=TOKEN --quiescent
                                  Recover only after old work has stopped
+  reconcile-delivery ID --token=TOKEN --quiescent
+                                 Clear a confirmed orphaned spawn window
   doctor [--agent codex|claude]    Check runtime and agent executable access
   --version                      Print installed version
 
@@ -41,7 +44,8 @@ const allowed: Record<string, readonly string[]> = {
   add: ['agent', 'task', 'cwd'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
-  retry: ['token'], recover: ['token', 'quiescent'], doctor: ['agent'],
+  retry: ['token'], recover: ['token', 'quiescent'],
+  'reconcile-delivery': ['token', 'quiescent'], doctor: ['agent'],
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function required(value: string | undefined, name: string): string {
@@ -73,7 +77,7 @@ export async function main(args: string[]): Promise<void> {
     for (const name of Object.keys(values)) {
       if (name !== 'state' && !permitted.includes(name)) throw new Error(`--${name} is not supported by ${command}`);
     }
-    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover'].includes(command);
+    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery'].includes(command);
     if (positionals.length !== (hasOperand ? 2 : 1)) throw new Error(`${command} expects ${hasOperand ? 'one argument' : 'no arguments'}`);
     const state = statePath(values.state ?? process.env.REPO_QUEUE_STATE ?? resolve(homedir(), '.local/state/repo-queue'));
     let result: unknown;
@@ -94,7 +98,17 @@ export async function main(args: string[]): Promise<void> {
       }
       default: {
         store = new Store(state);
-        if (command === 'status') { result = { dispatcher_running: await running(state), entries: store.list() }; break; }
+        if (command === 'status') {
+          const ledger = new DeliveryLedger(state);
+          try {
+            result = {
+              dispatcher_running: await running(state),
+              entries: store.list(),
+              delivery_attempts: ledger.list(),
+            };
+          } finally { ledger.close(); }
+          break;
+        }
         if (command === 'add') {
           const task = required(values.task, '--task');
           if (!uuid.test(task)) throw new Error('--task must be the original conversation UUID');
@@ -125,6 +139,17 @@ export async function main(args: string[]): Promise<void> {
           case 'recover':
             if (!values.quiescent) throw new Error('Recovery requires --quiescent: confirm the old owner and remote jobs have stopped');
             result = store.recover(id, token); break;
+          case 'reconcile-delivery': {
+            if (!values.quiescent) {
+              throw new Error('Delivery reconciliation requires --quiescent: confirm the delivery child has stopped');
+            }
+            const ownerStore = store;
+            const ledger = new DeliveryLedger(state);
+            try {
+              result = ledger.reconcileUnknown(id, true, () => ownerStore.verifyOwnership(id, token));
+            } finally { ledger.close(); }
+            break;
+          }
           default: throw new Error('Unknown command');
         }
       }

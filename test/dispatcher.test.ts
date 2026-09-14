@@ -412,8 +412,10 @@ test('stop releases the dispatcher without terminating an active agent process',
 test('delivery is globally bounded and serialized per owning session', async () => {
   await fixture(async (root, state, environment) => {
     const starts = join(root, 'starts');
+    const finishes = join(root, 'finishes');
     const gate = join(root, 'gate');
     writeFileSync(starts, '');
+    writeFileSync(finishes, '');
     writeFileSync(gate, '');
     executable(root, 'codex', `
       const fs = require('node:fs');
@@ -421,14 +423,20 @@ test('delivery is globally bounded and serialized per owning session', async () 
       const task = args[args.indexOf('--thread') + 1];
       fs.appendFileSync(process.env.REPOQ_FIXTURE + '/starts', task + '\\n');
       const timer = setInterval(() => {
-        if (!fs.existsSync(process.env.REPOQ_FIXTURE + '/gate')) { clearInterval(timer); process.exit(0); }
+        if (!fs.existsSync(process.env.REPOQ_FIXTURE + '/gate')) {
+          clearInterval(timer);
+          fs.appendFileSync(process.env.REPOQ_FIXTURE + '/finishes', task + '\\n');
+          process.exit(0);
+        }
       }, 20);
     `);
     const sharedTask = '10000000-0000-4000-8000-000000000030';
-    add(state, root, 30, sharedTask);
+    const recoveredWhileLive = add(state, root, 30, sharedTask);
     add(state, root, 31, sharedTask);
+    let retriedWhileLive: Entry | undefined;
     for (let number = 32; number <= 35; number += 1) {
-      add(state, root, number, `10000000-0000-4000-8000-0000000000${number}`);
+      const queued = add(state, root, number, `10000000-0000-4000-8000-0000000000${number}`);
+      if (number === 32) retriedWhileLive = queued;
     }
     await command(state, ['start'], environment);
     await until(() => readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length === 4, 'four concurrent deliveries');
@@ -440,8 +448,23 @@ test('delivery is globally bounded and serialized per owning session', async () 
     assert.equal(statuses.filter((status) => status === 'pending').length, 2);
     assert.equal(readFileSync(starts, 'utf8').trim().split('\n').filter((owner) => owner === sharedTask).length, 1);
 
+    const transitions = new Store(state);
+    transitions.claim(recoveredWhileLive.id, recoveredWhileLive.token ?? '');
+    transitions.close();
+
+    await command(state, ['stop'], environment);
+    await command(state, ['start'], environment);
+    assert.ok(retriedWhileLive?.token);
+    await command(state, ['recover', recoveredWhileLive.id, '--token', recoveredWhileLive.token ?? '', '--quiescent'], environment);
+    await command(state, ['retry', retriedWhileLive.id, '--token', retriedWhileLive.token], environment);
+    await delay(1_250);
+    assert.equal(readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length, 4);
+
+    await command(state, ['stop'], environment);
     unlinkSync(gate);
-    await until(() => readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length === 6, 'remaining serialized deliveries');
+    await until(() => readFileSync(finishes, 'utf8').trim().split('\n').filter(Boolean).length === 4, 'orphaned delivery exits');
+    await command(state, ['start'], environment);
+    await until(() => readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length === 8, 'remaining serialized deliveries');
   });
 });
 

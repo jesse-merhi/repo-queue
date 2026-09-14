@@ -69,12 +69,19 @@ test('Codex receives the exact task and the wake message as one argument', async
       fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }));
     `);
     const message = 'claim entry; $(never execute this)';
-    await deliver(entry('codex'), message);
+    const lifecycle: (string | number)[] = [];
+    await deliver(entry('codex'), message, undefined, {
+      beforeSpawn: () => { lifecycle.push('before'); },
+      spawned: (pid) => { lifecycle.push(pid); },
+    });
     const observed: unknown = JSON.parse(readFileSync(capture, 'utf8'));
     assert.deepEqual(observed, {
       args: ['queue', '--thread', task, '--message', message],
       cwd: realpathSync(tmpdir()),
     });
+    assert.equal(lifecycle[0], 'before');
+    assert.ok(typeof lifecycle[1] === 'number' && lifecycle[1] > 1);
+    assert.equal(lifecycle.length, 2);
     delete process.env.REPOQ_CAPTURE;
   });
 });
@@ -298,5 +305,53 @@ test('a timeout remains tracked until delayed SIGTERM cleanup closes the child',
     } finally {
       Object.defineProperty(AbortSignal, 'timeout', timeoutDescriptor);
     }
+  });
+});
+
+test('a child registration failure remains tracked until the spawned process closes', async () => {
+  await fixture(async (directory) => {
+    const ready = join(directory, 'registration-ready');
+    const signaled = join(directory, 'registration-signaled');
+    const finished = join(directory, 'registration-finished');
+    const gate = join(directory, 'registration-gate');
+    writeFileSync(gate, '');
+    executable(directory, 'codex', `
+      const fs = require('node:fs');
+      process.on('SIGTERM', () => {
+        fs.writeFileSync(${JSON.stringify(signaled)}, 'yes');
+      });
+      fs.writeFileSync(${JSON.stringify(ready)}, 'yes');
+      const timer = setInterval(() => {
+        if (!fs.existsSync(${JSON.stringify(gate)})) {
+          clearInterval(timer);
+          fs.writeFileSync(${JSON.stringify(finished)}, 'yes');
+          process.exit(0);
+        }
+      }, 20);
+    `);
+
+    let settled = false;
+    const delivery = deliver(entry('codex'), 'wake', undefined, {
+      beforeSpawn: () => {},
+      spawned: () => {
+        const deadline = Date.now() + 2_000;
+        while (!existsSync(ready) && Date.now() < deadline) { /* child initializes independently */ }
+        assert.equal(existsSync(ready), true);
+        throw new Error('fixture ledger write failed');
+      },
+    }).then(
+      () => { settled = true; return undefined; },
+      (error: unknown) => { settled = true; return error; },
+    );
+    await until(() => existsSync(ready), 'registered child initialization');
+    assert.equal(settled, false);
+    assert.equal(existsSync(signaled), false);
+    assert.equal(existsSync(finished), false);
+    rmSync(gate);
+    const error = await delivery;
+    assert(error instanceof Error);
+    assert.match(error.message, /fixture ledger write failed/);
+    assert.equal(readFileSync(finished, 'utf8'), 'yes');
+    assert.equal(existsSync(signaled), false);
   });
 });

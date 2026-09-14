@@ -13,6 +13,11 @@ interface CommandResult {
   readonly stderr: string;
 }
 
+export interface DeliveryProcessLifecycle {
+  beforeSpawn(): void;
+  spawned(pid: number): void;
+}
+
 function unrefHandle(handle: object): void {
   const unref = Reflect.get(handle, 'unref');
   if (typeof unref === 'function') unref.call(handle);
@@ -32,10 +37,12 @@ async function run(
     readonly cwd?: string;
     readonly timeoutMs?: number;
     readonly releaseSignal?: AbortSignal;
+    readonly lifecycle?: DeliveryProcessLifecycle;
     readonly label: string;
   },
 ): Promise<CommandResult> {
   return await new Promise<CommandResult>((resolve, reject) => {
+    options.lifecycle?.beforeSpawn();
     const child = spawn(command, args, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(options.timeoutMs) }),
@@ -69,7 +76,7 @@ async function run(
     child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
     child.stderr.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
     child.once('error', (error) => {
-      processError = error;
+      processError ??= error;
     });
     child.once('close', (code, signal) => {
       options.releaseSignal?.removeEventListener('abort', release);
@@ -87,6 +94,18 @@ async function run(
         resolve(result);
       }
     });
+
+    const childPid = child.pid;
+    if (childPid === undefined) {
+      processError = new Error(`${options.label} did not report a child process ID`);
+      child.kill('SIGKILL');
+    } else {
+      try {
+        options.lifecycle?.spawned(childPid);
+      } catch (error) {
+        processError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
   });
 }
 
@@ -123,7 +142,12 @@ function redact(error: unknown, token: string | null): Error {
 }
 
 /** Deliver one wake message. CLI acceptance is distinct from the owner's durable claim. */
-export async function deliver(entry: Entry, message: string, releaseSignal?: AbortSignal): Promise<void> {
+export async function deliver(
+  entry: Entry,
+  message: string,
+  releaseSignal?: AbortSignal,
+  lifecycle?: DeliveryProcessLifecycle,
+): Promise<void> {
   try {
     if (entry.agent === 'codex') {
       await run(
@@ -133,6 +157,7 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
           cwd: entry.cwd,
           timeoutMs: 60_000,
           ...(releaseSignal === undefined ? {} : { releaseSignal }),
+          ...(lifecycle === undefined ? {} : { lifecycle }),
           label: 'Codex queue delivery',
         },
       );
@@ -143,6 +168,7 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
       cwd: entry.cwd,
       timeoutMs: 30_000,
       ...(releaseSignal === undefined ? {} : { releaseSignal }),
+      ...(lifecycle === undefined ? {} : { lifecycle }),
       label: 'Claude active-session check',
     });
     const address = resolveClaudeLiveAddress(entry, active.stdout);
@@ -159,6 +185,7 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
           cwd: entry.cwd,
           timeoutMs: 120_000,
           ...(releaseSignal === undefined ? {} : { releaseSignal }),
+          ...(lifecycle === undefined ? {} : { lifecycle }),
           label: 'Claude native sender',
         },
       );
@@ -174,6 +201,7 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
       {
         cwd: entry.cwd,
         ...(releaseSignal === undefined ? {} : { releaseSignal }),
+        ...(lifecycle === undefined ? {} : { lifecycle }),
         label: 'Claude resume delivery',
       },
     );

@@ -504,6 +504,10 @@ export class Store {
     return entry;
   }
 
+  verifyOwnership(id: string, suppliedToken: string): Entry {
+    return this.owned(id, suppliedToken);
+  }
+
   done(id: string, suppliedToken: string): Entry {
     return this.write(() => {
       const entry = this.owned(id, suppliedToken);

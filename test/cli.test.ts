@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { wakeMessage } from '../src/dispatcher.ts';
+import { DeliveryLedger } from '../src/delivery-ledger.ts';
 import { Store } from '../src/store.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -53,6 +54,83 @@ test('CLI refuses recovery without a quiescence assertion', () => {
     const result = run(['--state', directory, 'recover', randomUUID(), '--token', 'token']);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /requires --quiescent/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('CLI reconciles an orphaned spawn window without changing a completed entry', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-reconcile-delivery-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    const added = store.add({
+      url: 'https://github.com/example/project/pull/166',
+      agent: 'codex', task: randomUUID(), cwd: directory,
+    });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    assert.ok(dead.pid > 1);
+    const ledger = new DeliveryLedger(state);
+    assert.ok(ledger.admit(reserved, dead.pid));
+    store.claim(added.id, reserved.token);
+    const completed = store.done(added.id, reserved.token);
+    ledger.close();
+    store.close();
+
+    const status = run(['--state', state, 'status']);
+    assert.equal(status.status, 0, status.stderr);
+    const attempts = object(status.stdout).delivery_attempts;
+    assert.deepEqual(attempts, [{ entry_id: added.id, dispatcher_pid: dead.pid, child_pid: null }]);
+    assert.deepEqual(Object.keys((attempts as Record<string, unknown>[])[0] ?? {}).sort(), [
+      'child_pid', 'dispatcher_pid', 'entry_id',
+    ]);
+
+    const missingAssertion = run(['--state', state, 'reconcile-delivery', added.id, '--token', reserved.token]);
+    assert.equal(missingAssertion.status, 1);
+    assert.match(missingAssertion.stderr, /requires --quiescent/);
+    const reconciled = run([
+      '--state', state, 'reconcile-delivery', added.id, '--token', reserved.token, '--quiescent',
+    ]);
+    assert.equal(reconciled.status, 0, reconciled.stderr);
+    assert.equal(object(reconciled.stdout).state, 'done');
+    assert.equal(object(reconciled.stdout).token, completed.token);
+
+    const reopened = new DeliveryLedger(state);
+    assert.ok(reopened.admit(completed, process.pid));
+    reopened.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('delivery reconciliation authenticates the current token after an older client rotated it', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-reconcile-stale-attempt-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    store.add({
+      url: 'https://github.com/example/project/pull/167',
+      agent: 'codex', task: randomUUID(), cwd: directory,
+    });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    assert.ok(dead.pid > 1);
+    const ledger = new DeliveryLedger(state);
+    assert.ok(ledger.admit(reserved, dead.pid));
+    const replacement = store.retry(reserved.id, reserved.token);
+    assert.ok(replacement.token);
+    ledger.close();
+    store.close();
+
+    const stale = run([
+      '--state', state, 'reconcile-delivery', reserved.id, '--token', reserved.token, '--quiescent',
+    ]);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /stale or invalid ownership token/);
+    const reconciled = run([
+      '--state', state, 'reconcile-delivery', reserved.id, '--token', replacement.token, '--quiescent',
+    ]);
+    assert.equal(reconciled.status, 0, reconciled.stderr);
+    assert.equal(object(reconciled.stdout).token, replacement.token);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
