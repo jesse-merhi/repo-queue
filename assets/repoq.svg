@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="240" viewBox="0 0 900 240" role="img" aria-labelledby="title desc">
+<title id="title">RepoQ</title><desc id="desc">One repository. One turn. Queue, yield, resume.</desc>
+<rect width="900" height="240" rx="24" fill="#111827"/>
+<path d="M70 73h104M70 120h76M70 167h104" stroke="#64748b" stroke-width="10" stroke-linecap="round"/>
+<circle cx="194" cy="73" r="14" fill="#34d399"/><circle cx="168" cy="120" r="14" fill="#94a3b8"/><circle cx="194" cy="167" r="14" fill="#94a3b8"/>
+<text x="250" y="128" font-family="system-ui,sans-serif" font-size="78" font-weight="750" fill="#f8fafc">Repo<tspan fill="#34d399">Q</tspan></text>
+<text x="255" y="173" font-family="system-ui,sans-serif" font-size="24" fill="#cbd5e1">One repository. One turn.</text>
+</svg>
