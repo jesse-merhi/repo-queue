@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process';
+import {
+  claudeSenderPrompt,
+  resolveClaudeLiveAddress,
+  verifyClaudeSenderOutput,
+} from './claude-messaging.ts';
 import type { Entry } from './types.ts';
 
 const maximumOutputBytes = 1024 * 1024;
@@ -92,17 +97,6 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseClaudeAgents(output: string): readonly { readonly sessionId: string }[] {
-  const parsed: unknown = JSON.parse(output);
-  if (
-    !Array.isArray(parsed) ||
-    !parsed.every((item) => record(item) && typeof item.sessionId === 'string')
-  ) {
-    throw new Error('Claude returned an invalid active-session response');
-  }
-  return parsed;
-}
-
 function verifyClaudeResult(output: string, expectedSession: string): void {
   const parsed: unknown = JSON.parse(output);
   if (!record(parsed) || parsed.session_id !== expectedSession || parsed.is_error !== false) {
@@ -138,8 +132,25 @@ export async function deliver(entry: Entry, message: string, releaseSignal?: Abo
       ...(releaseSignal === undefined ? {} : { releaseSignal }),
       label: 'Claude active-session check',
     });
-    if (parseClaudeAgents(active.stdout).some((item) => item.sessionId === entry.task)) {
-      throw new Error('Claude session is still running. Exit it before retrying delivery; --bg can fork it');
+    const address = resolveClaudeLiveAddress(entry, active.stdout);
+    if (address !== undefined) {
+      const sender = await run(
+        'claude',
+        [
+          '-p', '--safe-mode', '--tools', 'SendMessage',
+          '--permission-prompts', 'none', '--no-session-persistence',
+          '--max-turns', '3', '--output-format', 'stream-json', '--verbose',
+          '--', claudeSenderPrompt(address, message),
+        ],
+        {
+          cwd: entry.cwd,
+          timeoutMs: 120_000,
+          ...(releaseSignal === undefined ? {} : { releaseSignal }),
+          label: 'Claude native sender',
+        },
+      );
+      verifyClaudeSenderOutput(sender.stdout, address, message);
+      return;
     }
     const result = await run(
       'claude',

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -184,12 +185,98 @@ test('a shared status reader is not mistaken for the dispatcher and does not def
     await until(() => existsSync(ready), 'shared status reader');
     assert.equal(await running(state), false);
 
-    const releaseReader = delay(500).then(() => rmSync(release, { force: true }));
-    await command(state, ['start'], environment);
-    await releaseReader;
-    await readerExit;
-    await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after shared reader');
-    assert.equal(await running(state), true);
+    const daemons = [
+      spawn(process.execPath, [cli, '--state', state, 'serve'], { env: environment, stdio: 'ignore' }),
+      spawn(process.execPath, [cli, '--state', state, 'serve'], { env: environment, stdio: 'ignore' }),
+    ];
+    const daemonExits = daemons.map((daemon) => new Promise<void>((resolveExit) => {
+      daemon.once('exit', () => resolveExit());
+    }));
+    try {
+      await delay(500);
+      rmSync(release, { force: true });
+      await readerExit;
+      await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after shared reader');
+      assert.equal(await running(state), true);
+      await command(state, ['stop'], environment);
+      await Promise.race([
+        Promise.all(daemonExits),
+        delay(4_000, undefined, { ref: false }).then(() => {
+          throw new Error('a competing dispatcher took over after stop');
+        }),
+      ]);
+      assert.equal(await running(state), false);
+      assert.equal(existsSync(join(state, 'stop')), true);
+    } finally {
+      for (const daemon of daemons) {
+        if (daemon.exitCode === null) daemon.kill('SIGKILL');
+      }
+    }
+  });
+});
+
+test('a new stop generation fences a dispatcher waiting between reader retries', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    const ready = join(root, 'yield-reader-ready');
+    const release = join(root, 'yield-reader-release');
+    writeFileSync(messages, '');
+    writeFileSync(release, '');
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', process.argv.at(-1) + '\\n');
+    `);
+    add(state, root, 6, '10000000-0000-4000-8000-000000000006');
+    await running(state);
+
+    const reader = spawn(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      const { DatabaseSync } = require('node:sqlite');
+      const database = new DatabaseSync(process.env.REPOQ_DAEMON_DATABASE, { timeout: 0 });
+      database.exec('BEGIN');
+      database.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get();
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/pids', process.pid + '\\n');
+      fs.writeFileSync(process.env.REPOQ_READER_READY, 'ready');
+      const timer = setInterval(() => {
+        if (!fs.existsSync(process.env.REPOQ_READER_RELEASE)) {
+          clearInterval(timer);
+          database.exec('ROLLBACK');
+          database.close();
+        }
+      }, 10);
+    `], {
+      env: {
+        ...environment,
+        REPOQ_DAEMON_DATABASE: join(state, 'daemon.sqlite3'),
+        REPOQ_READER_READY: ready,
+        REPOQ_READER_RELEASE: release,
+      },
+      stdio: 'ignore',
+    });
+    const readerExit = new Promise<void>((resolveExit) => reader.once('exit', () => resolveExit()));
+    await until(() => existsSync(ready), 'reader holding a contended launch');
+    const contender = spawn(process.execPath, [cli, '--state', state, 'serve'], {
+      env: { ...environment, REPOQ_INTERNAL_STOP_GENERATION: '-' },
+      stdio: 'ignore',
+    });
+    const contenderExit = new Promise<void>((resolveExit) => contender.once('exit', () => resolveExit()));
+    try {
+      await delay(250);
+      assert.equal(contender.exitCode, null);
+      writeFileSync(join(state, 'stop'), randomUUID(), { mode: 0o600 });
+      rmSync(release, { force: true });
+      await readerExit;
+      await Promise.race([
+        contenderExit,
+        delay(3_000, undefined, { ref: false }).then(() => {
+          throw new Error('reader-blocked dispatcher ignored a newer stop generation');
+        }),
+      ]);
+      assert.equal(readFileSync(messages, 'utf8'), '');
+      assert.equal(await running(state), false);
+    } finally {
+      if (contender.exitCode === null) contender.kill('SIGKILL');
+    }
   });
 });
 

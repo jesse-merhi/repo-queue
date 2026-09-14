@@ -4,7 +4,7 @@
 
 `repo-queue status` returns JSON containing dispatcher status and each entry's PR, owner, state, delivery status and recovery token. Store the output privately. `repo-queue doctor --agent codex` or `--agent claude` checks executable availability.
 
-A successful notification only means the adapter accepted or completed the resume command. The owner must still claim its turn. Codex may accept a queued message while the desktop is unavailable to act on it; the reservation remains held.
+A successful notification means the adapter accepted a queued message, completed a resume command, or received a successful native Claude `SendMessage` result. The owner must still claim its turn. Codex may accept a message while the desktop is unavailable; Claude may hold or refuse a message under its inbound settings. Native send success does not distinguish those outcomes. The reservation remains held until the owner acts or it is explicitly recovered.
 
 ## Recover a failed notification
 
@@ -17,7 +17,7 @@ repo-queue verify-claim ENTRY_ID --token TOKEN \
 
 Use the actual current conversation identity (`--agent claude` for Claude). The read-only command succeeds only for the matching owner, token and claimed state. Continue the saved workflow and account for jobs already running. A duplicate wake does not cancel an existing claim. A blocked entry still needs explicit recovery; verification does not unblock it.
 
-Resolve authentication, missing executables, moved directories or the still-running Claude process, then use `retry ID --token TOKEN`. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
+Resolve authentication, missing executables, moved directories or incompatible native Claude messaging, then use `retry ID --token TOKEN`. For a live Claude session, inspect its inbound-message notices: it may hold or refuse messages from the sender's normal configured permission mode. Do not change global settings, terminate the session or repeatedly retry to force delivery. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
 
 When the owner has already claimed or blocked, use `recover ID --token TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.
 

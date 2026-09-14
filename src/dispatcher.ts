@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,7 +22,9 @@ const daemonDatabase = 'daemon.sqlite3';
 const legacyLock = 'dispatcher.lock';
 const stopRequest = 'stop';
 const deliveryLimit = 4;
-const daemonAcquireTimeoutMs = 2_000;
+const daemonAcquireDeadlineMs = 2_000;
+const internalStopGeneration = 'REPOQ_INTERNAL_STOP_GENERATION';
+const missingStopGeneration = '-';
 
 function prepareState(state: string): string {
   const stateDirectory = resolve(state);
@@ -50,8 +55,8 @@ function openDaemonDatabase(state: string, timeout: number): DatabaseSync {
   return database;
 }
 
-function acquire(state: string): DatabaseSync | undefined {
-  const database = openDaemonDatabase(state, daemonAcquireTimeoutMs);
+function tryAcquire(state: string): DatabaseSync | undefined {
+  const database = openDaemonDatabase(state, 0);
   try {
     database.exec('BEGIN EXCLUSIVE');
     return database;
@@ -62,11 +67,8 @@ function acquire(state: string): DatabaseSync | undefined {
   }
 }
 
-/** Probe the durable singleton lease without relying on process IDs or stale files. */
-export async function running(state: string): Promise<boolean> {
-  const stateDirectory = prepareState(state);
-  assertLegacyDispatcherRemoved(stateDirectory);
-  const database = openDaemonDatabase(stateDirectory, 0);
+function probe(state: string): boolean {
+  const database = openDaemonDatabase(state, 0);
   try {
     database.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get();
     return false;
@@ -76,6 +78,56 @@ export async function running(state: string): Promise<boolean> {
   } finally {
     database.close();
   }
+}
+
+function stopGeneration(path: string): string | undefined {
+  return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+}
+
+function publishStopGeneration(path: string): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, randomUUID(), { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function expectedStopGeneration(path: string): string | undefined {
+  const inherited = process.env[internalStopGeneration];
+  delete process.env[internalStopGeneration];
+  if (inherited === undefined) return stopGeneration(path);
+  return inherited === missingStopGeneration ? undefined : inherited;
+}
+
+function release(database: DatabaseSync): void {
+  database.exec('ROLLBACK');
+  database.close();
+}
+
+async function acquire(state: string, stopped: () => boolean): Promise<DatabaseSync | undefined> {
+  const deadline = Date.now() + daemonAcquireDeadlineMs;
+  while (true) {
+    if (stopped()) return undefined;
+    const database = tryAcquire(state);
+    if (database) {
+      if (!stopped()) return database;
+      release(database);
+      return undefined;
+    }
+    if (probe(state)) return undefined;
+    if (stopped()) return undefined;
+    if (Date.now() >= deadline) return undefined;
+    await delay(25);
+  }
+}
+
+/** Probe the durable singleton lease without relying on process IDs or stale files. */
+export async function running(state: string): Promise<boolean> {
+  const stateDirectory = prepareState(state);
+  assertLegacyDispatcherRemoved(stateDirectory);
+  return probe(stateDirectory);
 }
 
 function executableArguments(state: string): readonly [string, readonly string[]] {
@@ -89,11 +141,16 @@ export async function start(state: string): Promise<void> {
   const stateDirectory = prepareState(state);
   assertLegacyDispatcherRemoved(stateDirectory);
   if (await running(stateDirectory)) return;
+  const generation = stopGeneration(resolve(stateDirectory, stopRequest));
 
   const log = openSync(resolve(stateDirectory, 'dispatcher.log'), 'a', 0o600);
   const [command, args] = executableArguments(stateDirectory);
   const child = spawn(command, args, {
     detached: true,
+    env: {
+      ...process.env,
+      [internalStopGeneration]: generation ?? missingStopGeneration,
+    },
     stdio: ['ignore', log, log],
   });
   await new Promise<void>((resolveSpawn, rejectSpawn) => {
@@ -113,7 +170,9 @@ export async function start(state: string): Promise<void> {
 /** Request shutdown without releasing reservations or terminating agent processes. */
 export async function stop(state: string): Promise<void> {
   const stateDirectory = prepareState(state);
-  if (await running(stateDirectory)) writeFileSync(resolve(stateDirectory, stopRequest), '', { mode: 0o600 });
+  if (await running(stateDirectory)) {
+    publishStopGeneration(resolve(stateDirectory, stopRequest));
+  }
 }
 
 function shellWord(value: string): string {
@@ -167,17 +226,18 @@ export async function serve(state: string): Promise<void> {
   process.umask(0o077);
   const stateDirectory = prepareState(state);
   assertLegacyDispatcherRemoved(stateDirectory);
-  const lease = acquire(stateDirectory);
+  const stopPath = resolve(stateDirectory, stopRequest);
+  const expectedGeneration = expectedStopGeneration(stopPath);
+  const stopped = (): boolean => stopGeneration(stopPath) !== expectedGeneration;
+  const lease = await acquire(stateDirectory, stopped);
   if (!lease) return;
 
-  const stopPath = resolve(stateDirectory, stopRequest);
-  rmSync(stopPath, { force: true });
   const store = new Store(stateDirectory);
   const activeOwners = new Map<string, Promise<void>>();
   const deliveryLifecycle = new AbortController();
   try {
     store.markUncertain();
-    while (!existsSync(stopPath)) {
+    while (!stopped()) {
       store.reserve();
       for (const entry of store.pendingNotifications()) {
         if (activeOwners.size >= deliveryLimit) break;
@@ -194,9 +254,7 @@ export async function serve(state: string): Promise<void> {
     }
   } finally {
     deliveryLifecycle.abort();
-    rmSync(stopPath, { force: true });
     store.close();
-    lease.exec('ROLLBACK');
-    lease.close();
+    release(lease);
   }
 }

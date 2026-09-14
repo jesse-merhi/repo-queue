@@ -30,7 +30,7 @@ New sessions discover the skill. For consistent automatic use, add this to your 
 
 > For authorized GitHub or Bitbucket Cloud PR merges, use the repo-queue skill before final update, validation and merge, even when I do not mention the queue. A request to implement or review alone does not authorize a merge or require a turn.
 
-Do not replace your existing global instructions with this paragraph. Already-running conversations may retain older instructions. Claude's existing interactive process must exit before the standalone resume adapter can take over that session.
+Do not replace your existing global instructions with this paragraph. Already-running conversations may retain older instructions. Local Claude Code sessions can remain open. RepoQ uses a short-lived native sender restricted to messaging tools, with the normal configured permission mode and no interactive permission prompts. This consumes an extra sender model turn; the receiving session's work also consumes usage. Exited sessions use the standalone resume adapter. Receiver inbound settings and per-session permission-mode overrides can hold or refuse a live wake; installation does not change them.
 
 ## Background operation
 

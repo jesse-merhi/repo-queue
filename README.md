@@ -6,7 +6,7 @@ RepoQ gives each repository a waiting line. Your agent registers a pull request,
 
 **Queue → yield → resume → claim → complete.**
 
-It supports GitHub and Bitbucket Cloud PR URLs, Codex local desktop conversations, and exited Claude Code sessions. Separate repositories progress independently. Clones and worktrees share the same queue when they use the same local state directory.
+It supports GitHub and Bitbucket Cloud PR URLs, Codex local desktop conversations, and local Claude Code sessions. Separate repositories progress independently. Clones and worktrees share the same queue when they use the same local state directory.
 
 RepoQ schedules turns. Your agent still owns review, approvals, conflict resolution, validation, merge and deployment verification.
 
@@ -69,8 +69,13 @@ See [operations](docs/operations.md) for failure recovery, logs and shutdown.
 | --- | --- | --- |
 | Codex, local desktop conversation | `codex queue` | Desktop remains running. Delivery can be delayed. |
 | Claude Code, exited local session | `claude -p --resume` | Original process has exited; history and original directory remain available. |
-| Claude Code, open interactive/background process | Refused safely | Exit the process, then retry delivery. Ending a turn alone does not exit a terminal session. |
-| Codex cloud, Claude desktop/web | Unsupported | No adapter for these conversation surfaces. |
+| Claude Code, running local session | Native `SendMessage` from a restricted sender | Compatible local inbox and inbound settings; uses an extra sender model turn. |
+| Claude Desktop, Code tab | Local Claude Code inbox when exposed | Requires a discoverable local session; not verified for every Desktop version. |
+| Codex cloud, general Claude Chat/Cowork, remote sessions | Unsupported | No adapter for these conversation surfaces. |
+
+Live Claude delivery uses the normal configured sender permission mode. Claude may hold or refuse messages, including when a session overrides that mode. RepoQ does not change receiver settings or retry automatically. Native acceptance is not proof the owner acted; the successful queue claim establishes that.
+
+The native sender is exercised with Claude Code 2.1.269. It uses the built-in [cross-session messaging tools](https://code.claude.com/docs/en/cross-session-messaging). Exact targeting also validates Claude's local session registry, an implementation detail that can change; incompatible or stale records fail safely.
 
 Live adapter tests are opt-in and may consume account usage. Automated CI uses simulated executables and never calls a model, merges a PR or dispatches provider CI.
 

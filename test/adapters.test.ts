@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { createServer } from 'node:net';
 import test from 'node:test';
 import { deliver } from '../src/adapters.ts';
 import type { Entry } from '../src/types.ts';
@@ -67,20 +68,72 @@ test('Codex receives the exact task and the wake message as one argument', async
   });
 });
 
-test('a live Claude owner is rejected before resume', async () => {
+test('a live Claude owner receives one exact native SendMessage call', async () => {
   await fixture(async (directory) => {
     const capture = join(directory, 'calls');
+    const config = join(directory, 'claude-config');
+    const sessions = join(config, 'sessions');
+    const sockets = join(directory, 'sockets');
+    mkdirSync(sessions, { mode: 0o700, recursive: true });
+    mkdirSync(sockets, { mode: 0o700 });
+    const socket = join(sockets, 'target.sock');
+    const address = `uds:${socket}`;
+    const message = 'wake exactly; $(never execute this)';
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socket, resolve);
+    });
+    chmodSync(socket, 0o600);
     process.env.REPOQ_CAPTURE = capture;
+    process.env.CLAUDE_CONFIG_DIR = config;
+    writeFileSync(join(sessions, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
+      sessionId: task,
+      cwd: tmpdir(),
+      messagingSocketPath: socket,
+      peerProtocol: 1,
+      procStart: 'fixture-process-start',
+      pidDomain: process.platform === 'darwin' ? 'darwin' : 'linux',
+    }), { mode: 0o600 });
     executable(directory, 'claude', `
       const fs = require('node:fs');
-      fs.appendFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(process.argv.slice(2)) + '\\n');
-      process.stdout.write(JSON.stringify([{ sessionId: '${task}' }]));
+      const args = process.argv.slice(2);
+      fs.appendFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(args) + '\\n');
+      if (args[0] === 'agents') {
+        process.stdout.write(JSON.stringify([{ sessionId: '${task}', pid: ${process.pid}, cwd: ${JSON.stringify(tmpdir())} }]));
+      } else {
+        const useId = 'toolu_fixture';
+        const events = [
+          { type: 'system', subtype: 'init', tools: ['SendMessage'], permissionMode: 'bypassPermissions' },
+          { type: 'assistant', message: { content: [{ type: 'tool_use', id: useId, name: 'SendMessage', input: { to: ${JSON.stringify(address)}, message: ${JSON.stringify(message)} } }] } },
+          { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: useId, content: [{ type: 'text', text: JSON.stringify({ success: true, msg_id: 'native-message-id' }) }] }] } },
+          { type: 'result', is_error: false },
+        ];
+        process.stdout.write(events.map(JSON.stringify).join('\\n'));
+      }
     `);
-    await assert.rejects(deliver(entry('claude'), 'wake'), /still running/);
-    assert.deepEqual(readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line)), [
-      ['agents', '--json'],
-    ]);
-    delete process.env.REPOQ_CAPTURE;
+    try {
+      await deliver(entry('claude'), message);
+      const calls: unknown[] = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[0], ['agents', '--json']);
+      const sender = calls[1];
+      assert.ok(Array.isArray(sender));
+      assert.deepEqual(sender.slice(0, 13), [
+        '-p', '--safe-mode', '--tools', 'SendMessage',
+        '--permission-prompts', 'none', '--no-session-persistence',
+        '--max-turns', '3', '--output-format', 'stream-json', '--verbose', '--',
+      ]);
+      const prompt = sender[13];
+      assert.equal(typeof prompt, 'string');
+      assert.match(prompt, new RegExp(JSON.stringify(address).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(prompt, /SendMessage exactly once/);
+    } finally {
+      delete process.env.REPOQ_CAPTURE;
+      delete process.env.CLAUDE_CONFIG_DIR;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
