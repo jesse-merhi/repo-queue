@@ -54,8 +54,8 @@ async function run(
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
-    let settled = false;
     let overflow = false;
+    let processError: Error | undefined;
 
     const append = (destination: Buffer[], chunk: Buffer, currentBytes: number): number => {
       const remaining = maximumOutputBytes - currentBytes;
@@ -69,14 +69,9 @@ async function run(
     child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
     child.stderr.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
     child.once('error', (error) => {
-      if (settled) return;
-      settled = true;
-      options.releaseSignal?.removeEventListener('abort', release);
-      reject(error);
+      processError = error;
     });
     child.once('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
       options.releaseSignal?.removeEventListener('abort', release);
       const result = {
         stdout: Buffer.concat(stdout).toString('utf8'),
@@ -84,6 +79,8 @@ async function run(
       };
       if (overflow) {
         reject(new Error(`${options.label} output exceeded ${maximumOutputBytes} bytes`));
+      } else if (processError !== undefined) {
+        reject(processError);
       } else if (code !== 0) {
         reject(commandError(options.label, result, code, signal));
       } else {

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createServer } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { deliver } from '../src/adapters.ts';
 import { claudePidDomain } from '../src/claude-messaging.ts';
@@ -48,6 +49,15 @@ async function fixture(run: (directory: string) => Promise<void>): Promise<void>
     process.env.PATH = previousPath;
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+async function until(condition: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for ${description}`);
 }
 
 test('Codex receives the exact task and the wake message as one argument', async () => {
@@ -243,5 +253,48 @@ test('adapter failures redact ownership tokens and bound captured output', async
     assert(error instanceof Error);
     assert.match(error.message, /output exceeded 1048576 bytes/);
     assert.doesNotMatch(error.message, new RegExp(token));
+  });
+});
+
+test('a timeout remains tracked until delayed SIGTERM cleanup closes the child', async () => {
+  await fixture(async (directory) => {
+    const signaled = join(directory, 'signaled');
+    const finished = join(directory, 'finished');
+    executable(directory, 'codex', `
+      const fs = require('node:fs');
+      process.on('SIGTERM', () => {
+        fs.writeFileSync(${JSON.stringify(signaled)}, 'yes');
+        setTimeout(() => {
+          fs.writeFileSync(${JSON.stringify(finished)}, 'yes');
+          process.exit(0);
+        }, 250);
+      });
+      setInterval(() => {}, 1000);
+    `);
+
+    const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'timeout');
+    assert(timeoutDescriptor);
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    Object.defineProperty(AbortSignal, 'timeout', {
+      ...timeoutDescriptor,
+      value: (_milliseconds: number) => nativeTimeout(500),
+    });
+    let settled = false;
+    try {
+      const delivery = deliver(entry('codex'), 'wake').then(
+        () => { settled = true; return { status: 'resolved' as const }; },
+        (error: unknown) => { settled = true; return { status: 'rejected' as const, error }; },
+      );
+      await until(() => existsSync(signaled), 'delivery timeout signal');
+      assert.equal(settled, false);
+      assert.equal(existsSync(finished), false);
+      const outcome = await delivery;
+      assert.equal(outcome.status, 'rejected');
+      assert('error' in outcome && outcome.error instanceof Error);
+      assert.match(outcome.error.message, /aborted/i);
+      assert.equal(readFileSync(finished, 'utf8'), 'yes');
+    } finally {
+      Object.defineProperty(AbortSignal, 'timeout', timeoutDescriptor);
+    }
   });
 });

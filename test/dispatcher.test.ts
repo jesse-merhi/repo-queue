@@ -445,6 +445,99 @@ test('delivery is globally bounded and serialized per owning session', async () 
   });
 });
 
+test('timed-out delivery cleanup stays bounded and does not retain a stopped dispatcher', async () => {
+  await fixture(async (root, state, environment) => {
+    const starts = join(root, 'timeout-starts');
+    const signals = join(root, 'timeout-signals');
+    const finishes = join(root, 'timeout-finishes');
+    const gate = join(root, 'timeout-gate');
+    const clock = join(root, 'short-timeout.cjs');
+    for (const path of [starts, signals, finishes, gate]) writeFileSync(path, '');
+    writeFileSync(clock, `
+      const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+      Object.defineProperty(AbortSignal, 'timeout', {
+        configurable: true,
+        value: () => nativeTimeout(500),
+        writable: true,
+      });
+    `);
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      const args = process.argv.slice(2);
+      const task = args[args.indexOf('--thread') + 1];
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/pids', process.pid + '\\n');
+      fs.appendFileSync(${JSON.stringify(starts)}, task + ':' + process.pid + '\\n');
+      let stopping = false;
+      process.on('SIGTERM', () => {
+        if (stopping) return;
+        stopping = true;
+        fs.appendFileSync(${JSON.stringify(signals)}, task + ':' + process.pid + '\\n');
+      });
+      const timer = setInterval(() => {
+        if (!fs.existsSync(${JSON.stringify(gate)})) {
+          clearInterval(timer);
+          fs.appendFileSync(${JSON.stringify(finishes)}, task + ':' + process.pid + '\\n');
+          process.exit(0);
+        }
+      }, 20);
+    `);
+    const timedEnvironment = {
+      ...environment,
+      NODE_OPTIONS: `${environment.NODE_OPTIONS ?? ''} --require=${clock}`.trim(),
+    };
+    const sharedTask = '10000000-0000-4000-8000-000000000050';
+    add(state, root, 50, sharedTask);
+    add(state, root, 51, sharedTask);
+    for (let number = 52; number <= 56; number += 1) {
+      add(state, root, number, `10000000-0000-4000-8000-0000000000${number}`);
+    }
+
+    const daemon = spawn(process.execPath, [cli, '--state', state, 'serve'], {
+      env: timedEnvironment,
+      stdio: 'ignore',
+    });
+    const daemonExit = new Promise<void>((resolveExit) => daemon.once('exit', () => resolveExit()));
+    try {
+      await until(
+        () => readFileSync(signals, 'utf8').trim().split('\n').filter(Boolean).length === 4,
+        'four timed-out deliveries entering cleanup',
+      );
+      await delay(1_250);
+      const started = readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean);
+      assert.equal(started.length, 4);
+      assert.equal(started.filter((line) => line.startsWith(`${sharedTask}:`)).length, 1);
+      const livePids = started.map((line) => Number(line.slice(line.lastIndexOf(':') + 1)));
+      assert.equal(livePids.length, 4);
+      for (const pid of livePids) assert.doesNotThrow(() => process.kill(pid, 0));
+
+      const queue = new Store(state);
+      const statuses = queue.list().map((entry) => entry.delivery_status);
+      queue.close();
+      assert.equal(statuses.filter((status) => status === 'sending').length, 4);
+      assert.equal(statuses.filter((status) => status === 'pending').length, 3);
+
+      await command(state, ['stop'], timedEnvironment);
+      await Promise.race([
+        daemonExit,
+        delay(3_000, undefined, { ref: false }).then(() => {
+          throw new Error('dispatcher remained attached to timed-out delivery cleanup');
+        }),
+      ]);
+      for (const pid of livePids) assert.doesNotThrow(() => process.kill(pid, 0));
+      assert.equal(readFileSync(finishes, 'utf8'), '');
+
+      unlinkSync(gate);
+      await until(
+        () => readFileSync(finishes, 'utf8').trim().split('\n').filter(Boolean).length === 4,
+        'timed-out delivery cleanup completion',
+      );
+      assert.equal(readFileSync(starts, 'utf8').trim().split('\n').filter(Boolean).length, 4);
+    } finally {
+      if (daemon.exitCode === null) daemon.kill('SIGKILL');
+    }
+  });
+});
+
 test('legacy Python lock markers block Node start and serve migration', async () => {
   await fixture(async (_root, state) => {
     const initialized = new Store(state);
