@@ -12,7 +12,7 @@ const help = `RepoQ — local pull request turns for coding agents
 
 Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
 
-  add URL --agent codex|claude --task UUID [--cwd DIRECTORY]
+  add URL --agent codex|claude --task UUID [--cwd DIRECTORY] [--checkpoint FILE]
   status                         Show dispatcher and durable queue state
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
@@ -38,10 +38,10 @@ const options = {
   state: { type: 'string' }, agent: { type: 'string' }, task: { type: 'string' },
   cwd: { type: 'string' }, token: { type: 'string' }, reason: { type: 'string' },
   quiescent: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
-  version: { type: 'boolean', short: 'v' },
+  version: { type: 'boolean', short: 'v' }, checkpoint: { type: 'string' },
 } as const;
 const allowed: Record<string, readonly string[]> = {
-  add: ['agent', 'task', 'cwd'], status: [], start: [], stop: [], serve: [],
+  add: ['agent', 'task', 'cwd', 'checkpoint'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
   retry: ['token'], recover: ['token', 'quiescent'],
@@ -114,7 +114,10 @@ export async function main(args: string[]): Promise<void> {
           if (!uuid.test(task)) throw new Error('--task must be the original conversation UUID');
           const cwd = realpathSync(values.cwd ?? process.cwd());
           if (!statSync(cwd).isDirectory()) throw new Error('--cwd must be a directory');
-          result = store.add({ url: required(positionals[1], 'PR URL'), agent: agent(values.agent), task, cwd });
+          result = store.add({
+            url: required(positionals[1], 'PR URL'), agent: agent(values.agent), task, cwd,
+            ...(values.checkpoint === undefined ? {} : { checkpoint_path: resolve(cwd, required(values.checkpoint, '--checkpoint')) }),
+          });
           break;
         }
         const id = required(positionals[1], 'entry ID');

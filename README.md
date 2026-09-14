@@ -39,6 +39,8 @@ repo-queue add https://bitbucket.org/example/project/pull-requests/7 \
 repo-queue status
 ```
 
+For a prepared review/merge workflow, add `--checkpoint /absolute/path/to/continuation.md`. RepoQ retains that file's path across wakes and recovery. The file links the reviewed candidate, impact assessment or pending review assignment, validation evidence, running jobs and next action. The agent writes and maintains it; RepoQ does not decide what code needs review. See [continuation guidance](skills/repo-queue/references/continuation.md).
+
 The agent saves the returned entry ID and token, then ends its turn. The dispatcher sends the original conversation a message containing concrete commands:
 
 ```sh

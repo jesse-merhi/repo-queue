@@ -137,6 +137,7 @@ function parseStoredEntry(value: unknown): Entry {
   const task = storedString(row, "task", MAX_TASK_LENGTH);
   const cwd = storedString(row, "cwd", MAX_PATH_LENGTH);
   const ownerConfigValue = row.owner_config_root;
+  const checkpointValue = row.checkpoint_path;
   const state = storedString(row, "state", 16);
   const storedToken = row.token;
   const blockReason = storedString(row, "block_reason", MAX_MESSAGE_LENGTH, true);
@@ -187,6 +188,11 @@ function parseStoredEntry(value: unknown): Entry {
       "stored queue entry has an invalid owner configuration root",
     );
   }
+  if (checkpointValue !== undefined && checkpointValue !== null &&
+    (typeof checkpointValue !== "string" || checkpointValue.length === 0 ||
+      checkpointValue.length > MAX_PATH_LENGTH || !isAbsolute(checkpointValue))) {
+    throw new InvalidStoredEntryError("stored queue entry has an invalid checkpoint path");
+  }
   let parsed: PullRequest;
   try {
     parsed = pullRequest(url);
@@ -221,6 +227,7 @@ function parseStoredEntry(value: unknown): Entry {
     ...(typeof ownerConfigValue === "string"
       ? { owner_config_root: ownerConfigValue }
       : {}),
+    ...(typeof checkpointValue === "string" ? { checkpoint_path: checkpointValue } : {}),
     state,
     token: storedToken,
     block_reason: blockReason,
@@ -415,13 +422,24 @@ export class Store {
       throw new TypeError("cwd must be a directory");
     }
     const configRoot = ownerConfigRoot(input, realpathSync(cwd));
+    let checkpointPath: string | undefined;
+    if (input.checkpoint_path !== undefined) {
+      const path = boundedString(input.checkpoint_path, "checkpoint path", MAX_PATH_LENGTH);
+      if (!isAbsolute(path)) throw new TypeError("checkpoint path must be absolute");
+      checkpointPath = realpathSync(path);
+      if (checkpointPath.length > MAX_PATH_LENGTH || !statSync(checkpointPath).isFile()) {
+        throw new TypeError("checkpoint must be a regular file with a bounded absolute path");
+      }
+    }
 
     return this.write(() => {
       const existing = this.database
         .prepare(`
-          SELECT entries.*, owner_configs.config_root AS owner_config_root
+          SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          entry_checkpoints.path AS checkpoint_path
           FROM entries
           LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+          LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
           WHERE entries.repo = ? AND entries.pr_number = ?
         `)
         .get(parsed.repo, parsed.prNumber);
@@ -433,6 +451,9 @@ export class Store {
           entry.cwd === cwd &&
           (entry.owner_config_root === undefined || entry.owner_config_root === configRoot)
         ) {
+          if (checkpointPath !== undefined && checkpointPath !== entry.checkpoint_path) {
+            throw new ConflictError("pull request is already registered with a different checkpoint; update the original file");
+          }
           return entry;
         }
         throw new ConflictError(
@@ -464,6 +485,9 @@ export class Store {
       this.database.prepare(`
         INSERT INTO owner_configs (entry_id, config_root) VALUES (?, ?)
       `).run(id, configRoot);
+      if (checkpointPath !== undefined) {
+        this.database.prepare("INSERT INTO entry_checkpoints (entry_id, path) VALUES (?, ?)").run(id, checkpointPath);
+      }
       return this.updated(id);
     });
   }
@@ -471,9 +495,11 @@ export class Store {
   list(): Entry[] {
     return this.database
       .prepare(`
-        SELECT entries.*, owner_configs.config_root AS owner_config_root
+        SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+        LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
         ORDER BY entries.sequence
       `)
       .all()
@@ -647,9 +673,11 @@ export class Store {
 
   pendingNotifications(): Entry[] {
     return this.database.prepare(`
-      SELECT entries.*, owner_configs.config_root AS owner_config_root
+      SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          entry_checkpoints.path AS checkpoint_path
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+      LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
       WHERE entries.state = 'reserved' AND entries.delivery_status = 'pending'
       ORDER BY entries.sequence
     `).all().map((row) => parseStoredEntry(row));
@@ -751,6 +779,10 @@ export class Store {
         );
         CREATE INDEX IF NOT EXISTS entries_repo_state_sequence
           ON entries (repo, state, sequence);
+        CREATE TABLE IF NOT EXISTS entry_checkpoints (
+          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+          path TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS owner_configs (
           entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
           config_root TEXT NOT NULL
@@ -780,9 +812,11 @@ export class Store {
     const validatedId = boundedString(id, "entry id", MAX_TASK_LENGTH);
     const row = this.database
       .prepare(`
-        SELECT entries.*, owner_configs.config_root AS owner_config_root
+        SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+        LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
         WHERE entries.id = ?
       `)
       .get(validatedId);
