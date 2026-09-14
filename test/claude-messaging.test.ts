@@ -7,13 +7,14 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import test from "node:test";
 
 import {
   claudePidDomain,
+  claudeSessionsDirectory,
   claudeSenderPrompt,
   resolveClaudeLiveAddress,
   verifyClaudePidDomain,
@@ -69,6 +70,27 @@ function senderOutput(address: string, message: string): string {
     { type: "result", is_error: false },
   ].map((value) => JSON.stringify(value)).join("\n");
 }
+
+test("resolves relative Claude configuration from the owner directory", () => {
+  const owner = mkdtempSync(join(tmpdir(), "repoq-claude-config-owner-"));
+  const absoluteConfig = join(owner, "absolute-config");
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = "relative-config";
+    assert.equal(
+      claudeSessionsDirectory(owner),
+      join(owner, "relative-config", "sessions"),
+    );
+    process.env.CLAUDE_CONFIG_DIR = absoluteConfig;
+    assert.equal(claudeSessionsDirectory(owner), join(absoluteConfig, "sessions"));
+    delete process.env.CLAUDE_CONFIG_DIR;
+    assert.equal(claudeSessionsDirectory(owner), join(homedir(), ".claude", "sessions"));
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    rmSync(owner, { recursive: true, force: true });
+  }
+});
 
 test("resolves one exact live Claude UUID and working directory to its private UDS address", async () => {
   const root = mkdtempSync(join(tmpdir(), "repoq-claude-live-"));

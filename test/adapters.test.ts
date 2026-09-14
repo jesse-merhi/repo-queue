@@ -83,9 +83,11 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
   await fixture(async (directory) => {
     const capture = join(directory, 'calls');
     const discoveryCwd = join(directory, 'discovery-cwd');
-    const config = join(directory, 'claude-config');
-    const sessions = join(config, 'sessions');
+    const owner = join(directory, 'owner');
+    const config = 'claude-config';
+    const sessions = join(owner, config, 'sessions');
     const sockets = join(directory, 'sockets');
+    mkdirSync(owner, { mode: 0o700 });
     mkdirSync(sessions, { mode: 0o700, recursive: true });
     mkdirSync(sockets, { mode: 0o700 });
     const socket = join(sockets, 'target.sock');
@@ -103,7 +105,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
     writeFileSync(join(sessions, `${process.pid}.json`), JSON.stringify({
       pid: process.pid,
       sessionId: task,
-      cwd: tmpdir(),
+      cwd: owner,
       messagingSocketPath: socket,
       peerProtocol: 1,
       procStart: 'fixture-process-start',
@@ -115,7 +117,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       fs.appendFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(args) + '\\n');
       if (args[0] === 'agents') {
         fs.writeFileSync(process.env.REPOQ_DISCOVERY_CWD, process.cwd());
-        process.stdout.write(JSON.stringify([{ sessionId: '${task}', pid: ${process.pid}, cwd: ${JSON.stringify(tmpdir())} }]));
+        process.stdout.write(JSON.stringify([{ sessionId: '${task}', pid: ${process.pid}, cwd: ${JSON.stringify(owner)} }]));
       } else {
         const useId = 'toolu_fixture';
         const events = [
@@ -128,12 +130,12 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       }
     `);
     try {
-      await deliver(entry('claude'), message);
+      await deliver({ ...entry('claude'), cwd: owner }, message);
       const calls: unknown[] = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       assert.equal(calls.length, 2);
       assert.deepEqual(calls[0], ['agents', '--json']);
-      assert.equal(readFileSync(discoveryCwd, 'utf8'), realpathSync(tmpdir()));
-      assert.notEqual(realpathSync(process.cwd()), realpathSync(tmpdir()));
+      assert.equal(readFileSync(discoveryCwd, 'utf8'), realpathSync(owner));
+      assert.notEqual(realpathSync(process.cwd()), realpathSync(owner));
       const sender = calls[1];
       assert.ok(Array.isArray(sender));
       assert.deepEqual(sender.slice(0, 13), [

@@ -9,7 +9,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { Entry } from "./types.ts";
 
@@ -170,9 +170,12 @@ function assertSocket(path: string, userId: number): void {
   }
 }
 
-export function claudeSessionsDirectory(): string {
+export function claudeSessionsDirectory(ownerDirectory = process.cwd()): string {
   const configured = process.env.CLAUDE_CONFIG_DIR;
-  return join(configured?.trim() ? configured : join(homedir(), ".claude"), "sessions");
+  const configDirectory = configured?.trim()
+    ? resolve(ownerDirectory, configured)
+    : join(homedir(), ".claude");
+  return join(configDirectory, "sessions");
 }
 
 export function parseClaudeAgents(output: string): readonly ClaudeActiveSession[] {
@@ -206,7 +209,7 @@ export function parseClaudeAgents(output: string): readonly ClaudeActiveSession[
 export function resolveClaudeLiveAddress(
   entry: Readonly<Entry>,
   agentsOutput: string,
-  sessionsDirectory = claudeSessionsDirectory(),
+  sessionsDirectory = claudeSessionsDirectory(entry.cwd),
 ): string | undefined {
   const matches = parseClaudeAgents(agentsOutput)
     .filter((session) => session.sessionId === entry.task);
