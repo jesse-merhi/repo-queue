@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -254,5 +254,99 @@ test('packed command installs without runtime dependencies or its source checkou
     const result = spawnSync(process.execPath, [join(prefix, 'bin/repo-queue'), '--version'], { cwd: directory, encoding: 'utf8', timeout: 10_000 });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^RepoQ 0\.1\.0/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('checkpoint follows registration, wake, claim and recovery without duplicating work', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-checkpoint-'));
+  try {
+    const state = join(directory, 'state');
+    const task = randomUUID();
+    const filename = "review's continuation.md";
+    const checkpoint = join(directory, filename);
+    writeFileSync(checkpoint, 'Next: assess integration against the previous reviewed candidate.');
+    const args = ['--state', state, 'add', 'https://github.com/example/project/pull/42',
+      '--agent', 'codex', '--task', task, '--cwd', directory];
+    const added = run([...args, '--checkpoint', filename]);
+    assert.equal(added.status, 0, added.stderr);
+    const entry = object(added.stdout);
+    const path = realpathSync(checkpoint);
+    assert.equal(entry.checkpoint_path, path);
+
+    const duplicate = run(args);
+    assert.equal(duplicate.status, 0, duplicate.stderr);
+    assert.deepEqual(object(duplicate.stdout), entry);
+    const sameFile = run([...args, '--checkpoint', path]);
+    assert.equal(sameFile.status, 0, sameFile.stderr);
+    assert.deepEqual(object(sameFile.stdout), entry);
+
+    const store = new Store(state);
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    assert.equal(reserved.checkpoint_path, path);
+    const pending = store.pendingNotifications()[0];
+    assert.equal(pending?.checkpoint_path, path);
+    assert.ok(wakeMessage(reserved, state).includes(JSON.stringify(path)));
+    store.close();
+
+    const claim = run(['--state', state, 'claim', reserved.id, `--token=${reserved.token}`]);
+    assert.equal(claim.status, 0, claim.stderr);
+    assert.equal(object(claim.stdout).checkpoint_path, path);
+    writeFileSync(checkpoint, 'Assessment 18: review middleware and expiry callers. CI run 891 remains active.');
+    const verified = run(['--state', state, 'verify-claim', reserved.id, `--token=${reserved.token}`,
+      '--agent', 'codex', '--task', task, '--cwd', directory]);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(object(verified.stdout).checkpoint_path, path);
+    assert.equal(readFileSync(path, 'utf8'), 'Assessment 18: review middleware and expiry callers. CI run 891 remains active.');
+
+    const blocked = run(['--state', state, 'block', reserved.id, `--token=${reserved.token}`, '--reason', 'fixture interrupted']);
+    assert.equal(blocked.status, 0, blocked.stderr);
+    // No agent or remote jobs were launched in this fixture.
+    const recovered = run(['--state', state, 'recover', reserved.id, `--token=${reserved.token}`, '--quiescent']);
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(object(recovered.stdout).checkpoint_path, path);
+    assert.notEqual(object(recovered.stdout).token, reserved.token);
+    const stale = run(['--state', state, 'claim', reserved.id, `--token=${reserved.token}`]);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /stale or invalid ownership token/);
+
+    // A missing artifact must not corrupt queue state or prevent ownership recovery.
+    rmSync(checkpoint);
+    const reopened = new Store(state);
+    try {
+      const wake = reopened.pendingNotifications()[0];
+      assert.ok(wake?.token);
+      assert.equal(wake.checkpoint_path, path);
+      assert.ok(wakeMessage(wake, state).includes(JSON.stringify(path)));
+      assert.equal(reopened.claim(wake.id, wake.token).checkpoint_path, path);
+      assert.equal(reopened.done(wake.id, wake.token).state, 'done');
+    } finally { reopened.close(); }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('invalid or replacement checkpoints cannot create or redirect a queue entry', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-checkpoint-invalid-'));
+  try {
+    const state = join(directory, 'state');
+    const args = ['--state', state, 'add', 'https://github.com/example/project/pull/43',
+      '--agent', 'codex', '--task', randomUUID(), '--cwd', directory];
+    for (const checkpoint of ['', directory, join(directory, 'missing')]) {
+      const rejected = run([...args, '--checkpoint', checkpoint]);
+      assert.equal(rejected.status, 1);
+      const store = new Store(state);
+      try { assert.deepEqual(store.list(), []); } finally { store.close(); }
+    }
+    const first = join(directory, 'first.md');
+    const replacement = join(directory, 'replacement.md');
+    writeFileSync(first, 'original workflow');
+    writeFileSync(replacement, 'different workflow');
+    const added = run([...args, '--checkpoint', first]);
+    assert.equal(added.status, 0, added.stderr);
+    const rejected = run([...args, '--checkpoint', replacement]);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /different checkpoint/);
+    const store = new Store(state);
+    try { assert.deepEqual(store.list(), [object(added.stdout)]); } finally { store.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

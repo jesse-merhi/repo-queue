@@ -713,3 +713,23 @@ describe("Store", () => {
     item.store.close();
   });
 });
+
+
+test("opening a pre-checkpoint database preserves its claimed owner", () => {
+  const item = fixture();
+  const added = add(item, "https://github.com/acme/legacy/pull/1");
+  const reserved = firstEntry(item.store.reserve());
+  const claimed = item.store.claim(added.id, requireToken(reserved));
+  item.store.close();
+  const database = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+  database.exec("DROP TABLE entry_checkpoints");
+  database.close();
+  const reopened = new Store(item.stateDir);
+  try {
+    assert.deepEqual(reopened.verifyClaim(claimed.id, requireToken(claimed), {
+      agent: claimed.agent, task: claimed.task, cwd: claimed.cwd,
+    }), claimed);
+    assert.equal(reopened.list()[0]?.checkpoint_path, undefined);
+    assert.deepEqual(reopened.reserve(), []);
+  } finally { reopened.close(); }
+});

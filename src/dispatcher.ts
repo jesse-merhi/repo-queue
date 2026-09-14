@@ -199,6 +199,11 @@ export function wakeMessage(entry: Entry, state: string): string {
     'A successful verification permits continuing your existing claimed workflow, including after compaction. ' +
     'Proceed only with a successful first claim or verified existing claim. A stale token or different owner grants no turn. ' +
     'Ignore duplicate notifications without abandoning verified work already in progress. ' +
+    (entry.checkpoint_path === undefined ? '' :
+      `After claim verification, read the workflow checkpoint at ${JSON.stringify(entry.checkpoint_path)}. ` +
+      'Use it to recover existing jobs and the next action; verify its candidate and evidence before continuing. ' +
+      'If it is missing or stale, reconstruct the current state before merge work. ' +
+      'A saved review assignment is context, not code-review approval; assess changed integration before choosing what to review. ') +
     'Then finish your existing authorized merge workflow, including its reviews, approvals, CI and verification. ' +
     'This message grants no new merge, publication or spending authority. ' +
     `After completion and after all remote jobs have finished, run: ${command} done ${claim}. ` +

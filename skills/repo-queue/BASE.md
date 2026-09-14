@@ -5,11 +5,14 @@ description: Coordinate authorized GitHub and Bitbucket Cloud PR merges through 
 
 Use `repo-queue` for authorized GitHub or Bitbucket Cloud PR merges on this machine, including requests to merge, land or ship a PR. Join before the final update from the target branch and merge-validation run. Ordinary development and tests may happen before joining. A request to implement or review alone does not authorize merging or require a turn. The queue schedules local turns; the repository's existing workflow owns preparation, review, approvals, CI, merge and verification. Queue membership and wake messages grant no new merge, publication or spending authority.
 
+Before joining, save a workflow checkpoint outside the checkout using [continuation guidance](references/continuation.md). It identifies the reviewed candidate, existing code-review assignment or required impact assessment, evidence, running jobs and next action. Keep the same file current after integration, review, validation and interruption.
+
 Register from the original harness environment with its conversation UUID and working directory. RepoQ records that harness's configuration directory for delivery, including a custom `CODEX_HOME` or `CLAUDE_CONFIG_DIR`:
 
 ```sh
 repo-queue start
-repo-queue add <pr-url> --agent <codex-or-claude> --task <conversation-uuid> --cwd <worktree>
+repo-queue add <pr-url> --agent <codex-or-claude> --task <conversation-uuid> --cwd <worktree> \
+  --checkpoint <absolute-checkpoint-file>
 ```
 
 Use the harness-provided identity. For Codex CLI, `CODEX_THREAD_ID` may supply it; in the desktop use the current task identity. For Claude, use the session UUID provided by the session interface or `claude agents --json`. Never substitute another task or create a new conversation to receive the turn. If the identity cannot be established, ask for it.
@@ -24,6 +27,8 @@ repo-queue verify-claim <entry-id> --token=<token> \
 ```
 
 This read-only check succeeds only for the matching owner, token and claimed state. Success permits continuing that existing workflow from its saved checkpoint, after accounting for any jobs already running. It grants no second claim or parallel owner. If a claim fails, inspect the recorded state: an existing claim for this conversation with the same token needs verification. A stale token or different owner grants no turn; do not copy a replacement token from status to make an old wake succeed. A waiting entry has no turn. Only the current reservation and its replacement wake permit a fresh claim. Ignore a duplicate notification without abandoning another verified turn already in progress. For blocked work, resolve the blocker and use recovery below; do not treat verification as an unblock command. Complete the existing authorized repository workflow and report any required approval.
+
+After a successful claim or verification, read the returned `checkpoint_path` and follow the continuation guidance before dispatching more work. An older entry without a checkpoint continues from its original conversation.
 
 After the workflow succeeds and associated remote work has finished, run the wake message's `done` command. If blocked, run its `block` command with a concrete reason, explain what is needed and end the turn. A blocked entry retains the repository reservation.
 
