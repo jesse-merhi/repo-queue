@@ -66,6 +66,10 @@ test('CLI reconciles an orphaned spawn window without changing a completed entry
       url: 'https://github.com/example/project/pull/166',
       agent: 'codex', task: randomUUID(), cwd: directory,
     });
+    const database = new DatabaseSync(store.databasePath);
+    try {
+      database.prepare('UPDATE entries SET token = ? WHERE id = ?').run('-reconcile_fixture_token', added.id);
+    } finally { database.close(); }
     const reserved = store.reserve()[0];
     assert.ok(reserved?.token);
     const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -85,11 +89,11 @@ test('CLI reconciles an orphaned spawn window without changing a completed entry
       'child_pid', 'dispatcher_pid', 'entry_id',
     ]);
 
-    const missingAssertion = run(['--state', state, 'reconcile-delivery', added.id, '--token', reserved.token]);
+    const missingAssertion = run(['--state', state, 'reconcile-delivery', added.id, `--token=${reserved.token}`]);
     assert.equal(missingAssertion.status, 1);
     assert.match(missingAssertion.stderr, /requires --quiescent/);
     const reconciled = run([
-      '--state', state, 'reconcile-delivery', added.id, '--token', reserved.token, '--quiescent',
+      '--state', state, 'reconcile-delivery', added.id, `--token=${reserved.token}`, '--quiescent',
     ]);
     assert.equal(reconciled.status, 0, reconciled.stderr);
     assert.equal(object(reconciled.stdout).state, 'done');
@@ -106,10 +110,14 @@ test('delivery reconciliation authenticates the current token after an older cli
   try {
     const state = join(directory, 'state');
     const store = new Store(state);
-    store.add({
+    const added = store.add({
       url: 'https://github.com/example/project/pull/167',
       agent: 'codex', task: randomUUID(), cwd: directory,
     });
+    const database = new DatabaseSync(store.databasePath);
+    try {
+      database.prepare('UPDATE entries SET token = ? WHERE id = ?').run('-stale_fixture_token', added.id);
+    } finally { database.close(); }
     const reserved = store.reserve()[0];
     assert.ok(reserved?.token);
     const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -122,12 +130,12 @@ test('delivery reconciliation authenticates the current token after an older cli
     store.close();
 
     const stale = run([
-      '--state', state, 'reconcile-delivery', reserved.id, '--token', reserved.token, '--quiescent',
+      '--state', state, 'reconcile-delivery', reserved.id, `--token=${reserved.token}`, '--quiescent',
     ]);
     assert.equal(stale.status, 1);
     assert.match(stale.stderr, /stale or invalid ownership token/);
     const reconciled = run([
-      '--state', state, 'reconcile-delivery', reserved.id, '--token', replacement.token, '--quiescent',
+      '--state', state, 'reconcile-delivery', reserved.id, `--token=${replacement.token}`, '--quiescent',
     ]);
     assert.equal(reconciled.status, 0, reconciled.stderr);
     assert.equal(object(reconciled.stdout).token, replacement.token);
