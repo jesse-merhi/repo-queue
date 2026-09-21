@@ -33,6 +33,7 @@ export interface Entry {
   task: string;
   cwd: string;
   owner_config_root?: string;
+  owner_config_explicit?: boolean;
   checkpoint_path?: string;
   state: QueueState;
   token: string | null;

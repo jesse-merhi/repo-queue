@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,7 +12,11 @@ import type { Entry } from '../src/types.ts';
 const task = '10000000-0000-4000-8000-000000000001';
 const token = 'private-delivery-token';
 
-function entry(agent: Entry['agent'], ownerConfigRoot?: string): Entry {
+function entry(
+  agent: Entry['agent'],
+  ownerConfigRoot?: string,
+  ownerConfigExplicit?: boolean,
+): Entry {
   return {
     sequence: 1,
     id: '20000000-0000-4000-8000-000000000002',
@@ -24,6 +28,7 @@ function entry(agent: Entry['agent'], ownerConfigRoot?: string): Entry {
     task,
     cwd: tmpdir(),
     ...(ownerConfigRoot === undefined ? {} : { owner_config_root: ownerConfigRoot }),
+    ...(ownerConfigExplicit === undefined ? {} : { owner_config_explicit: ownerConfigExplicit }),
     state: 'reserved',
     token,
     block_reason: '',
@@ -108,9 +113,10 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
     const configCapture = join(directory, 'configs');
     const discoveryCwd = join(directory, 'discovery-cwd');
     const owner = join(directory, 'owner');
-    const config = join(owner, 'claude-config');
+    const config = join(owner, '.claude');
     const dispatcherConfig = join(directory, 'dispatcher-claude');
     const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousHome = process.env.HOME;
     const sessions = join(config, 'sessions');
     const sockets = join(directory, 'sockets');
     mkdirSync(owner, { mode: 0o700 });
@@ -128,6 +134,7 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
     process.env.REPOQ_CAPTURE = capture;
     process.env.REPOQ_CONFIG_CAPTURE = configCapture;
     process.env.REPOQ_DISCOVERY_CWD = discoveryCwd;
+    process.env.HOME = owner;
     process.env.CLAUDE_CONFIG_DIR = dispatcherConfig;
     writeFileSync(join(sessions, `${process.pid}.json`), JSON.stringify({
       pid: process.pid,
@@ -158,10 +165,13 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       }
     `);
     try {
-      await deliver({ ...entry('claude', config), cwd: owner }, message);
+      await deliver({ ...entry('claude', config, false), cwd: owner }, message);
       const calls: unknown[] = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       assert.equal(calls.length, 2);
-      assert.deepEqual(readFileSync(configCapture, 'utf8').trim().split('\n'), [config, config]);
+      assert.deepEqual(
+        readFileSync(configCapture, 'utf8').trim().split('\n'),
+        ['undefined', 'undefined'],
+      );
       assert.equal(process.env.CLAUDE_CONFIG_DIR, dispatcherConfig);
       assert.deepEqual(calls[0], ['agents', '--json']);
       assert.equal(readFileSync(discoveryCwd, 'utf8'), realpathSync(owner));
@@ -183,6 +193,8 @@ test('a live Claude owner receives one exact native SendMessage call', async () 
       delete process.env.REPOQ_DISCOVERY_CWD;
       if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
@@ -251,6 +263,63 @@ test('Claude accepts ordinary and verbose success output for the exact exited ow
         } finally {
           delete process.env.REPOQ_CAPTURE;
           delete process.env.REPOQ_CONFIG_CAPTURE;
+          if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+          else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+        }
+      });
+    });
+  }
+});
+
+test('Claude preserves whether the default config environment was explicit', async (context) => {
+  const cases = [
+    { name: 'unset default', explicit: false, expectedConfig: null },
+    { name: 'explicit default', explicit: true, expectedConfig: join(homedir(), '.claude') },
+  ] as const;
+  for (const item of cases) {
+    await context.test(item.name, async () => {
+      await fixture(async (directory) => {
+        const capture = join(directory, 'default-config.json');
+        const dispatcherConfig = join(directory, 'dispatcher-claude');
+        const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+        process.env.REPOQ_CAPTURE = capture;
+        process.env.CLAUDE_CONFIG_DIR = dispatcherConfig;
+        executable(directory, 'claude', `
+          const fs = require('node:fs');
+          const args = process.argv.slice(2);
+          const calls = fs.existsSync(process.env.REPOQ_CAPTURE)
+            ? JSON.parse(fs.readFileSync(process.env.REPOQ_CAPTURE, 'utf8'))
+            : [];
+          calls.push({ args, config: process.env.CLAUDE_CONFIG_DIR ?? null });
+          fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(calls));
+          if (args[0] === 'agents') process.stdout.write('[]');
+          else process.stdout.write(JSON.stringify({
+            type: 'result',
+            subtype: 'success',
+            session_id: '${task}',
+            is_error: false,
+            result: 'wake accepted',
+          }));
+        `);
+        try {
+          await deliver(
+            entry('claude', join(homedir(), '.claude'), item.explicit),
+            'wake',
+          );
+          const calls: unknown = JSON.parse(readFileSync(capture, 'utf8'));
+          assert.deepEqual(calls, [
+            { args: ['agents', '--json'], config: item.expectedConfig },
+            {
+              args: [
+                '-p', '--resume', task, '--output-format', 'json',
+                '--permission-prompts', 'none', '--', 'wake',
+              ],
+              config: item.expectedConfig,
+            },
+          ]);
+          assert.equal(process.env.CLAUDE_CONFIG_DIR, dispatcherConfig);
+        } finally {
+          delete process.env.REPOQ_CAPTURE;
           if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
           else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
         }

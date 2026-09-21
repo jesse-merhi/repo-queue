@@ -255,15 +255,25 @@ describe("Store", () => {
       const claude = add(item, "https://github.com/acme/claude/pull/2", {
         agent: "claude",
       });
+      process.env.CLAUDE_CONFIG_DIR = join(homedir(), ".claude");
+      const explicitClaude = add(
+        item,
+        "https://github.com/acme/claude-explicit/pull/3",
+        { agent: "claude" },
+      );
       delete process.env.CODEX_HOME;
-      const defaultCodex = add(item, "https://github.com/acme/codex-default/pull/3");
+      const defaultCodex = add(item, "https://github.com/acme/codex-default/pull/4");
 
       assert.equal(
         codex.owner_config_root,
         join(realpathSync(item.cwd), "codex config with spaces"),
       );
       assert.equal(claude.owner_config_root, join(homedir(), ".claude"));
+      assert.equal(claude.owner_config_explicit, false);
+      assert.equal(explicitClaude.owner_config_root, join(homedir(), ".claude"));
+      assert.equal(explicitClaude.owner_config_explicit, true);
       assert.equal(defaultCodex.owner_config_root, join(homedir(), ".codex"));
+      assert.equal(defaultCodex.owner_config_explicit, undefined);
       process.env.CODEX_HOME = "codex config with spaces";
       assert.equal(
         add(item, "https://github.com/acme/codex/pull/1", { task }).id,
@@ -286,8 +296,8 @@ describe("Store", () => {
           assert.ok(typeof value.name === "string");
           return value.name;
         });
-      assert.deepEqual(columns, ["entry_id", "config_root"]);
-      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 1);
+      assert.deepEqual(columns, ["entry_id", "config_root", "env_explicit"]);
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 2);
       database.close();
     } finally {
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -296,6 +306,61 @@ describe("Store", () => {
       else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
       item.store.close();
     }
+  });
+
+  test("Codex ownership remains stable when delivery makes the default root explicit", () => {
+    const item = fixture();
+    const previousCodexHome = process.env.CODEX_HOME;
+    try {
+      delete process.env.CODEX_HOME;
+      const added = add(item, "https://github.com/acme/codex-owner/pull/1");
+      assert.equal(added.owner_config_root, join(homedir(), ".codex"));
+      assert.equal(added.owner_config_explicit, undefined);
+      const reserved = firstEntry(item.store.reserve());
+      const claimed = item.store.claim(reserved.id, requireToken(reserved));
+
+      process.env.CODEX_HOME = join(homedir(), ".codex");
+      assert.equal(
+        item.store.verifyClaim(claimed.id, requireToken(claimed), {
+          agent: "codex",
+          task: claimed.task,
+          cwd: claimed.cwd,
+        }).id,
+        claimed.id,
+      );
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      item.store.close();
+    }
+  });
+
+  test("migrates version-1 owner configuration without guessing its environment mode", () => {
+    const item = fixture();
+    const entry = add(item, "https://github.com/acme/legacy-owner/pull/1", {
+      agent: "claude",
+    });
+    item.store.close();
+    const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+    legacy.exec(`
+      ALTER TABLE owner_configs DROP COLUMN env_explicit;
+      PRAGMA user_version = 1;
+    `);
+    legacy.close();
+
+    const migrated = new Store(item.stateDir);
+    const restored = migrated.list().find((candidate) => candidate.id === entry.id);
+    assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
+    assert.equal(restored?.owner_config_explicit, undefined);
+    const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 2);
+    assert.equal(
+      database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
+        .get(entry.id)?.env_explicit,
+      null,
+    );
+    database.close();
+    migrated.close();
   });
 
   test("rolls back a new entry when its owner configuration cannot be stored", () => {
@@ -658,7 +723,7 @@ describe("Store", () => {
     assert.equal(migrated.claim(reserved.id, ownerToken).cwd, "/work/legacy");
     assert.equal(migrated.done(reserved.id, ownerToken).state, "done");
     const version = new DatabaseSync(migrated.databasePath, { readOnly: true });
-    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 1);
+    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 2);
     version.close();
     migrated.close();
   });

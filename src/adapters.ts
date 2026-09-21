@@ -146,7 +146,15 @@ function redact(error: unknown, token: string | null): Error {
 function ownerEnvironment(entry: Readonly<Entry>): NodeJS.ProcessEnv | undefined {
   if (entry.owner_config_root === undefined) return undefined;
   const variable = entry.agent === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
-  return { ...process.env, [variable]: entry.owner_config_root };
+  const env = { ...process.env };
+
+  // Claude keys macOS Keychain credentials by whether CLAUDE_CONFIG_DIR is set.
+  if (entry.agent === 'claude' && entry.owner_config_explicit === false) {
+    delete env.CLAUDE_CONFIG_DIR;
+  } else {
+    env[variable] = entry.owner_config_root;
+  }
+  return env;
 }
 
 /** Deliver one wake message. CLI acceptance is distinct from the owner's durable claim. */
