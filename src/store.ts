@@ -24,7 +24,7 @@ import {
   type Provider,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_URL_LENGTH = 2_048;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_TASK_LENGTH = 64;
@@ -283,6 +283,10 @@ function configEnvironmentVariable(agent: Entry["agent"]): "CODEX_HOME" | "CLAUD
   return agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR";
 }
 
+function defaultConfigRoot(agent: Entry["agent"]): string {
+  return join(homedir(), agent === "codex" ? ".codex" : ".claude");
+}
+
 type OwnerConfigInput = Pick<
   AddEntryInput,
   "agent" | "cwd" | "owner_config_root"
@@ -319,7 +323,7 @@ function ownerConfig(input: Readonly<OwnerConfigInput>, cwd: string): OwnerConfi
     };
   }
   return {
-    root: join(homedir(), input.agent === "codex" ? ".codex" : ".claude"),
+    root: defaultConfigRoot(input.agent),
     ...(input.agent === "claude" ? { explicit: false } : {}),
   };
 }
@@ -846,6 +850,18 @@ export class Store {
             env_explicit IN (0, 1) OR env_explicit IS NULL
           )
         `);
+      }
+      if (versionValue < 3) {
+        this.database.prepare(`
+          UPDATE owner_configs
+          SET env_explicit = 0
+          WHERE env_explicit IS NULL
+            AND config_root = ?
+            AND entry_id IN (
+              SELECT id FROM entries
+              WHERE agent = 'claude' AND state != 'done'
+            )
+        `).run(defaultConfigRoot("claude"));
       }
       if (versionValue < SCHEMA_VERSION) {
         this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);

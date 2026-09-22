@@ -297,7 +297,7 @@ describe("Store", () => {
           return value.name;
         });
       assert.deepEqual(columns, ["entry_id", "config_root", "env_explicit"]);
-      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 2);
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
       database.close();
     } finally {
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -335,7 +335,7 @@ describe("Store", () => {
     }
   });
 
-  test("migrates version-1 owner configuration without guessing its environment mode", () => {
+  test("migrates unfinished version-1 Claude owners at the implicit default", () => {
     const item = fixture();
     const entry = add(item, "https://github.com/acme/legacy-owner/pull/1", {
       agent: "claude",
@@ -351,16 +351,73 @@ describe("Store", () => {
     const migrated = new Store(item.stateDir);
     const restored = migrated.list().find((candidate) => candidate.id === entry.id);
     assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
-    assert.equal(restored?.owner_config_explicit, undefined);
+    assert.equal(restored?.owner_config_explicit, false);
     const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 2);
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
     assert.equal(
       database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
         .get(entry.id)?.env_explicit,
-      null,
+      0,
     );
     database.close();
     migrated.close();
+  });
+
+  test("version-2 migration preserves explicit Claude roots and completed history", () => {
+    const item = fixture();
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      process.env.CLAUDE_CONFIG_DIR = join(homedir(), ".claude");
+      const explicitDefault = add(
+        item,
+        "https://github.com/acme/explicit-default/pull/1",
+        { agent: "claude" },
+      );
+      process.env.CLAUDE_CONFIG_DIR = join(item.root, "custom-claude");
+      const explicitCustom = add(
+        item,
+        "https://github.com/acme/explicit-custom/pull/1",
+        { agent: "claude" },
+      );
+      delete process.env.CLAUDE_CONFIG_DIR;
+      const completed = add(
+        item,
+        "https://github.com/acme/completed-default/pull/1",
+        { agent: "claude" },
+      );
+      const reserved = item.store.reserve().find((entry) => entry.id === completed.id);
+      assert.ok(reserved !== undefined);
+      const claimed = item.store.claim(reserved.id, requireToken(reserved));
+      item.store.done(claimed.id, requireToken(claimed));
+      item.store.close();
+
+      const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+      legacy.prepare(`
+        UPDATE owner_configs SET env_explicit = NULL WHERE entry_id = ?
+      `).run(completed.id);
+      legacy.exec("PRAGMA user_version = 2");
+      legacy.close();
+
+      const migrated = new Store(item.stateDir);
+      const entries = migrated.list();
+      assert.equal(
+        entries.find((entry) => entry.id === explicitDefault.id)?.owner_config_explicit,
+        true,
+      );
+      assert.equal(
+        entries.find((entry) => entry.id === explicitCustom.id)?.owner_config_explicit,
+        true,
+      );
+      assert.equal(
+        entries.find((entry) => entry.id === completed.id)?.owner_config_explicit,
+        undefined,
+      );
+      migrated.close();
+    } finally {
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      if (item.store) item.store.close();
+    }
   });
 
   test("rolls back a new entry when its owner configuration cannot be stored", () => {
@@ -723,7 +780,7 @@ describe("Store", () => {
     assert.equal(migrated.claim(reserved.id, ownerToken).cwd, "/work/legacy");
     assert.equal(migrated.done(reserved.id, ownerToken).state, "done");
     const version = new DatabaseSync(migrated.databasePath, { readOnly: true });
-    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 2);
+    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 3);
     version.close();
     migrated.close();
   });
