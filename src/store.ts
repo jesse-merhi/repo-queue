@@ -24,7 +24,7 @@ import {
   type Provider,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 const MAX_URL_LENGTH = 2_048;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_TASK_LENGTH = 64;
@@ -137,6 +137,7 @@ function parseStoredEntry(value: unknown): Entry {
   const task = storedString(row, "task", MAX_TASK_LENGTH);
   const cwd = storedString(row, "cwd", MAX_PATH_LENGTH);
   const ownerConfigValue = row.owner_config_root;
+  const ownerConfigExplicitValue = row.owner_config_explicit;
   const checkpointValue = row.checkpoint_path;
   const state = storedString(row, "state", 16);
   const storedToken = row.token;
@@ -172,6 +173,26 @@ function parseStoredEntry(value: unknown): Entry {
       storedToken.length > MAX_TOKEN_LENGTH)
   ) {
     throw new InvalidStoredEntryError("stored queue entry has an invalid token");
+  }
+  if (
+    typeof ownerConfigValue === "string" &&
+    ownerConfigExplicitValue !== 0 &&
+    ownerConfigExplicitValue !== 1 &&
+    ownerConfigExplicitValue !== null &&
+    ownerConfigExplicitValue !== undefined
+  ) {
+    throw new InvalidStoredEntryError(
+      "stored queue entry has invalid owner configuration environment metadata",
+    );
+  }
+  if (
+    (ownerConfigValue === null || ownerConfigValue === undefined) &&
+    ownerConfigExplicitValue !== null &&
+    ownerConfigExplicitValue !== undefined
+  ) {
+    throw new InvalidStoredEntryError(
+      "stored queue entry has owner configuration environment metadata without a root",
+    );
   }
   if (!isAbsolute(cwd)) {
     throw new InvalidStoredEntryError("stored queue entry has a non-absolute cwd");
@@ -227,6 +248,9 @@ function parseStoredEntry(value: unknown): Entry {
     ...(typeof ownerConfigValue === "string"
       ? { owner_config_root: ownerConfigValue }
       : {}),
+    ...(ownerConfigExplicitValue === 0 || ownerConfigExplicitValue === 1
+      ? { owner_config_explicit: ownerConfigExplicitValue === 1 }
+      : {}),
     ...(typeof checkpointValue === "string" ? { checkpoint_path: checkpointValue } : {}),
     state,
     token: storedToken,
@@ -259,12 +283,21 @@ function configEnvironmentVariable(agent: Entry["agent"]): "CODEX_HOME" | "CLAUD
   return agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR";
 }
 
+function defaultConfigRoot(agent: Entry["agent"]): string {
+  return join(homedir(), agent === "codex" ? ".codex" : ".claude");
+}
+
 type OwnerConfigInput = Pick<
   AddEntryInput,
   "agent" | "cwd" | "owner_config_root"
 >;
 
-function ownerConfigRoot(input: Readonly<OwnerConfigInput>, cwd: string): string {
+interface OwnerConfig {
+  root: string;
+  explicit?: boolean;
+}
+
+function ownerConfig(input: Readonly<OwnerConfigInput>, cwd: string): OwnerConfig {
   if (input.owner_config_root !== undefined) {
     const supplied = boundedString(
       input.owner_config_root,
@@ -274,16 +307,25 @@ function ownerConfigRoot(input: Readonly<OwnerConfigInput>, cwd: string): string
     if (!isAbsolute(supplied)) {
       throw new TypeError("owner configuration root must be absolute");
     }
-    return supplied;
+    return {
+      root: supplied,
+      ...(input.agent === "claude" ? { explicit: true } : {}),
+    };
   }
   const configured = process.env[configEnvironmentVariable(input.agent)];
   if (configured !== undefined && configured.length > 0) {
-    return resolve(
-      cwd,
-      boundedString(configured, "owner configuration root", MAX_PATH_LENGTH),
-    );
+    return {
+      root: resolve(
+        cwd,
+        boundedString(configured, "owner configuration root", MAX_PATH_LENGTH),
+      ),
+      ...(input.agent === "claude" ? { explicit: true } : {}),
+    };
   }
-  return join(homedir(), input.agent === "codex" ? ".codex" : ".claude");
+  return {
+    root: defaultConfigRoot(input.agent),
+    ...(input.agent === "claude" ? { explicit: false } : {}),
+  };
 }
 
 function pullRequest(input: unknown): PullRequest {
@@ -421,7 +463,7 @@ export class Store {
     if (!cwdStatus.isDirectory()) {
       throw new TypeError("cwd must be a directory");
     }
-    const configRoot = ownerConfigRoot(input, realpathSync(cwd));
+    const config = ownerConfig(input, realpathSync(cwd));
     let checkpointPath: string | undefined;
     if (input.checkpoint_path !== undefined) {
       const path = boundedString(input.checkpoint_path, "checkpoint path", MAX_PATH_LENGTH);
@@ -436,6 +478,7 @@ export class Store {
       const existing = this.database
         .prepare(`
           SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          owner_configs.env_explicit AS owner_config_explicit,
           entry_checkpoints.path AS checkpoint_path
           FROM entries
           LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -449,7 +492,9 @@ export class Store {
           entry.agent === input.agent &&
           entry.task === task &&
           entry.cwd === cwd &&
-          (entry.owner_config_root === undefined || entry.owner_config_root === configRoot)
+          (entry.owner_config_root === undefined || entry.owner_config_root === config.root) &&
+          (entry.owner_config_explicit === undefined ||
+            entry.owner_config_explicit === config.explicit)
         ) {
           if (checkpointPath !== undefined && checkpointPath !== entry.checkpoint_path) {
             throw new ConflictError("pull request is already registered with a different checkpoint; update the original file");
@@ -483,8 +528,12 @@ export class Store {
         timestamp,
       );
       this.database.prepare(`
-        INSERT INTO owner_configs (entry_id, config_root) VALUES (?, ?)
-      `).run(id, configRoot);
+        INSERT INTO owner_configs (entry_id, config_root, env_explicit) VALUES (?, ?, ?)
+      `).run(
+        id,
+        config.root,
+        config.explicit === undefined ? null : config.explicit ? 1 : 0,
+      );
       if (checkpointPath !== undefined) {
         this.database.prepare("INSERT INTO entry_checkpoints (entry_id, path) VALUES (?, ?)").run(id, checkpointPath);
       }
@@ -496,6 +545,7 @@ export class Store {
     return this.database
       .prepare(`
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          owner_configs.env_explicit AS owner_config_explicit,
           entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -585,12 +635,14 @@ export class Store {
     } catch {
       throw new OwnershipError("queue entry owner cwd is unavailable");
     }
-    const configRoot = ownerConfigRoot(owner, ownerCwd);
+    const config = ownerConfig(owner, ownerCwd);
     if (
       entry.agent !== owner.agent ||
       entry.task !== task ||
       entryCwd !== ownerCwd ||
-      (entry.owner_config_root !== undefined && entry.owner_config_root !== configRoot)
+      (entry.owner_config_root !== undefined && entry.owner_config_root !== config.root) ||
+      (entry.owner_config_explicit !== undefined &&
+        entry.owner_config_explicit !== config.explicit)
     ) {
       throw new OwnershipError(
         "queue entry is claimed by a different agent, task, cwd, or configuration root",
@@ -674,6 +726,7 @@ export class Store {
   pendingNotifications(): Entry[] {
     return this.database.prepare(`
       SELECT entries.*, owner_configs.config_root AS owner_config_root,
+        owner_configs.env_explicit AS owner_config_explicit,
           entry_checkpoints.path AS checkpoint_path
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -785,9 +838,19 @@ export class Store {
         );
         CREATE TABLE IF NOT EXISTS owner_configs (
           entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
-          config_root TEXT NOT NULL
+          config_root TEXT NOT NULL,
+          env_explicit INTEGER CHECK (
+            env_explicit IN (0, 1) OR env_explicit IS NULL
+          )
         );
       `);
+      if (versionValue === 1) {
+        this.database.exec(`
+          ALTER TABLE owner_configs ADD COLUMN env_explicit INTEGER CHECK (
+            env_explicit IN (0, 1) OR env_explicit IS NULL
+          )
+        `);
+      }
       if (versionValue < SCHEMA_VERSION) {
         this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       }
@@ -813,6 +876,7 @@ export class Store {
     const row = this.database
       .prepare(`
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
+          owner_configs.env_explicit AS owner_config_explicit,
           entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
