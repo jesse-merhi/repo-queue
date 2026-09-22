@@ -851,18 +851,6 @@ export class Store {
           )
         `);
       }
-      if (versionValue < 3) {
-        this.database.prepare(`
-          UPDATE owner_configs
-          SET env_explicit = 0
-          WHERE env_explicit IS NULL
-            AND config_root = ?
-            AND entry_id IN (
-              SELECT id FROM entries
-              WHERE agent = 'claude' AND state IN ('waiting', 'reserved')
-            )
-        `).run(defaultConfigRoot("claude"));
-      }
       if (versionValue < SCHEMA_VERSION) {
         this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       }

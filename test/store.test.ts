@@ -335,7 +335,7 @@ describe("Store", () => {
     }
   });
 
-  test("migrates unfinished version-1 Claude owners at the implicit default", () => {
+  test("version-1 migration preserves ambiguous default Claude owners", () => {
     const item = fixture();
     const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
     try {
@@ -354,15 +354,67 @@ describe("Store", () => {
       const migrated = new Store(item.stateDir);
       const restored = migrated.list().find((candidate) => candidate.id === entry.id);
       assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
-      assert.equal(restored?.owner_config_explicit, false);
+      assert.equal(restored?.owner_config_explicit, undefined);
       const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
       assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
       assert.equal(
         database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
           .get(entry.id)?.env_explicit,
-        0,
+        null,
       );
       database.close();
+      migrated.close();
+    } finally {
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      item.store.close();
+    }
+  });
+
+  test("version-1 migration preserves an explicitly configured sent reservation", () => {
+    const item = fixture();
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      process.env.CLAUDE_CONFIG_DIR = join(homedir(), ".claude");
+      const entry = add(item, "https://github.com/acme/sent-legacy-owner/pull/1", {
+        agent: "claude",
+      });
+      const reserved = firstEntry(item.store.reserve());
+      assert.equal(item.store.beginDelivery(reserved.id, requireToken(reserved)), true);
+      assert.equal(item.store.delivery(reserved.id, requireToken(reserved), true), true);
+      item.store.close();
+
+      const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+      legacy.exec(`
+        ALTER TABLE owner_configs DROP COLUMN env_explicit;
+        PRAGMA user_version = 1;
+      `);
+      legacy.close();
+
+      const migrated = new Store(item.stateDir);
+      const restored = migrated.list().find((candidate) => candidate.id === entry.id);
+      assert.ok(restored !== undefined);
+      assert.equal(restored?.state, "reserved");
+      assert.equal(restored?.delivery_status, "sent");
+      assert.equal(restored?.owner_config_explicit, undefined);
+      assert.equal(
+        migrated.add({
+          url: "https://github.com/acme/sent-legacy-owner/pull/1",
+          agent: "claude",
+          task: entry.task,
+          cwd: item.cwd,
+        }).id,
+        entry.id,
+      );
+      const claimed = migrated.claim(restored.id, requireToken(restored));
+      assert.equal(
+        migrated.verifyClaim(claimed.id, requireToken(claimed), {
+          agent: "claude",
+          task: claimed.task,
+          cwd: claimed.cwd,
+        }).id,
+        claimed.id,
+      );
       migrated.close();
     } finally {
       if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
