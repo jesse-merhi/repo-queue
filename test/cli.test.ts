@@ -13,8 +13,13 @@ import { Store } from '../src/store.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(root, 'bin/repo-queue');
-function run(args: string[]) {
-  return spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', timeout: 10_000 });
+const cliEnvironment = { ...process.env };
+delete cliEnvironment.CODEX_THREAD_ID;
+delete cliEnvironment.CODEX_SESSION_ID;
+function run(args: string[], environment: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    encoding: 'utf8', timeout: 10_000, env: { ...cliEnvironment, ...environment },
+  });
 }
 function object(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
@@ -45,6 +50,57 @@ test('CLI registers an original conversation and rejects unsupported options wit
     const entries = object(status.stdout).entries;
     assert.ok(Array.isArray(entries));
     assert.equal(entries.length, 1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('CLI rejects Codex collaboration workers before registration', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-codex-owner-'));
+  try {
+    const state = join(directory, 'state');
+    const rootTask = randomUUID();
+    const result = run([
+      '--state', state, 'add', 'https://github.com/example/project/pull/9',
+      '--agent', 'codex', '--task', rootTask, '--cwd', directory,
+    ], {
+      CODEX_THREAD_ID: rootTask,
+      CODEX_SESSION_ID: randomUUID(),
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /collaboration sub-agents cannot receive RepoQ wakes/);
+
+    const status = run(['--state', state, 'status']);
+    assert.equal(status.status, 0, status.stderr);
+    assert.deepEqual(object(status.stdout).entries, []);
+
+    const claude = run([
+      '--state', state, 'add', 'https://github.com/example/project/pull/11',
+      '--agent', 'claude', '--task', rootTask, '--cwd', directory,
+    ], {
+      CODEX_THREAD_ID: rootTask,
+      CODEX_SESSION_ID: randomUUID(),
+    });
+    assert.equal(claude.status, 0, claude.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('CLI accepts the current root Codex task and rejects another task identity', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-root-codex-owner-'));
+  try {
+    const state = join(directory, 'state');
+    const rootTask = randomUUID();
+    const environment = { CODEX_THREAD_ID: rootTask, CODEX_SESSION_ID: rootTask };
+    const base = [
+      '--state', state, 'add', 'https://github.com/example/project/pull/10',
+      '--agent', 'codex', '--cwd', directory,
+    ];
+
+    const otherTask = run([...base, '--task', randomUUID()], environment);
+    assert.equal(otherTask.status, 1);
+    assert.match(otherTask.stderr, /--task must match the current Codex task/);
+
+    const currentTask = run([...base, '--task', rootTask], environment);
+    assert.equal(currentTask.status, 0, currentTask.stderr);
+    assert.equal(object(currentTask.stdout).task, rootTask);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
