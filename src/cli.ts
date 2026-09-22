@@ -56,6 +56,19 @@ function agent(value: string | undefined): Agent {
   if (value !== 'codex' && value !== 'claude') throw new Error('--agent must be codex or claude');
   return value;
 }
+function validateCodexOwner(owner: Agent, task: string): void {
+  if (owner !== 'codex') return;
+  const thread = process.env.CODEX_THREAD_ID;
+  const session = process.env.CODEX_SESSION_ID;
+  if (thread !== undefined && session !== undefined && thread !== session) {
+    throw new Error(
+      'collaboration sub-agents cannot receive RepoQ wakes; register from the root Codex task',
+    );
+  }
+  if (thread !== undefined && task !== thread) {
+    throw new Error('--task must match the current Codex task');
+  }
+}
 function statePath(value: string): string {
   return resolve(value === '~' ? homedir() : value.startsWith('~/') ? resolve(homedir(), value.slice(2)) : value);
 }
@@ -112,10 +125,12 @@ export async function main(args: string[]): Promise<void> {
         if (command === 'add') {
           const task = required(values.task, '--task');
           if (!uuid.test(task)) throw new Error('--task must be the original conversation UUID');
+          const owner = agent(values.agent);
+          validateCodexOwner(owner, task);
           const cwd = realpathSync(values.cwd ?? process.cwd());
           if (!statSync(cwd).isDirectory()) throw new Error('--cwd must be a directory');
           result = store.add({
-            url: required(positionals[1], 'PR URL'), agent: agent(values.agent), task, cwd,
+            url: required(positionals[1], 'PR URL'), agent: owner, task, cwd,
             ...(values.checkpoint === undefined ? {} : { checkpoint_path: resolve(cwd, required(values.checkpoint, '--checkpoint')) }),
           });
           break;
