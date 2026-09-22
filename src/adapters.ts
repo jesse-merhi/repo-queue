@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { dirname } from 'node:path';
 import {
   claudeSenderPrompt,
   resolveClaudeLiveAddress,
@@ -151,6 +152,7 @@ function ownerEnvironment(entry: Readonly<Entry>): NodeJS.ProcessEnv | undefined
   // Claude keys macOS Keychain credentials by whether CLAUDE_CONFIG_DIR is set.
   if (entry.agent === 'claude' && entry.owner_config_explicit === false) {
     delete env.CLAUDE_CONFIG_DIR;
+    env.HOME = dirname(entry.owner_config_root);
   } else {
     env[variable] = entry.owner_config_root;
   }

@@ -859,7 +859,7 @@ export class Store {
             AND config_root = ?
             AND entry_id IN (
               SELECT id FROM entries
-              WHERE agent = 'claude' AND state != 'done'
+              WHERE agent = 'claude' AND state IN ('waiting', 'reserved')
             )
         `).run(defaultConfigRoot("claude"));
       }

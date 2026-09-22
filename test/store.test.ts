@@ -337,30 +337,76 @@ describe("Store", () => {
 
   test("migrates unfinished version-1 Claude owners at the implicit default", () => {
     const item = fixture();
-    const entry = add(item, "https://github.com/acme/legacy-owner/pull/1", {
-      agent: "claude",
-    });
-    item.store.close();
-    const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
-    legacy.exec(`
-      ALTER TABLE owner_configs DROP COLUMN env_explicit;
-      PRAGMA user_version = 1;
-    `);
-    legacy.close();
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      const entry = add(item, "https://github.com/acme/legacy-owner/pull/1", {
+        agent: "claude",
+      });
+      item.store.close();
+      const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+      legacy.exec(`
+        ALTER TABLE owner_configs DROP COLUMN env_explicit;
+        PRAGMA user_version = 1;
+      `);
+      legacy.close();
 
-    const migrated = new Store(item.stateDir);
-    const restored = migrated.list().find((candidate) => candidate.id === entry.id);
-    assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
-    assert.equal(restored?.owner_config_explicit, false);
-    const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
-    assert.equal(
-      database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
-        .get(entry.id)?.env_explicit,
-      0,
-    );
-    database.close();
-    migrated.close();
+      const migrated = new Store(item.stateDir);
+      const restored = migrated.list().find((candidate) => candidate.id === entry.id);
+      assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
+      assert.equal(restored?.owner_config_explicit, false);
+      const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
+      assert.equal(
+        database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
+          .get(entry.id)?.env_explicit,
+        0,
+      );
+      database.close();
+      migrated.close();
+    } finally {
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      item.store.close();
+    }
+  });
+
+  test("version-1 migration preserves a claimed Claude owner's environment mode", () => {
+    const item = fixture();
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      process.env.CLAUDE_CONFIG_DIR = join(homedir(), ".claude");
+      const entry = add(item, "https://github.com/acme/claimed-legacy-owner/pull/1", {
+        agent: "claude",
+      });
+      const reserved = firstEntry(item.store.reserve());
+      const claimed = item.store.claim(reserved.id, requireToken(reserved));
+      item.store.close();
+
+      const legacy = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+      legacy.exec(`
+        ALTER TABLE owner_configs DROP COLUMN env_explicit;
+        PRAGMA user_version = 1;
+      `);
+      legacy.close();
+
+      const migrated = new Store(item.stateDir);
+      const restored = migrated.list().find((candidate) => candidate.id === entry.id);
+      assert.equal(restored?.owner_config_explicit, undefined);
+      assert.equal(
+        migrated.verifyClaim(claimed.id, requireToken(claimed), {
+          agent: "claude",
+          task: claimed.task,
+          cwd: claimed.cwd,
+        }).id,
+        claimed.id,
+      );
+      migrated.close();
+    } finally {
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      item.store.close();
+    }
   });
 
   test("version-2 migration preserves explicit Claude roots and completed history", () => {

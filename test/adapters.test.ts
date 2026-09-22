@@ -328,6 +328,65 @@ test('Claude preserves whether the default config environment was explicit', asy
   }
 });
 
+test('Claude restores the saved owner home for an implicit default config', async () => {
+  await fixture(async (directory) => {
+    const capture = join(directory, 'owner-home.json');
+    const ownerHome = join(directory, 'owner-home');
+    const dispatcherHome = join(directory, 'dispatcher-home');
+    const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousHome = process.env.HOME;
+    mkdirSync(ownerHome);
+    mkdirSync(dispatcherHome);
+    process.env.REPOQ_CAPTURE = capture;
+    process.env.CLAUDE_CONFIG_DIR = join(directory, 'dispatcher-claude');
+    process.env.HOME = dispatcherHome;
+    executable(directory, 'claude', `
+      const fs = require('node:fs');
+      const args = process.argv.slice(2);
+      const calls = fs.existsSync(process.env.REPOQ_CAPTURE)
+        ? JSON.parse(fs.readFileSync(process.env.REPOQ_CAPTURE, 'utf8'))
+        : [];
+      calls.push({
+        args,
+        config: process.env.CLAUDE_CONFIG_DIR ?? null,
+        home: process.env.HOME,
+      });
+      fs.writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(calls));
+      if (args[0] === 'agents') process.stdout.write('[]');
+      else process.stdout.write(JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        session_id: '${task}',
+        is_error: false,
+        result: 'wake accepted',
+      }));
+    `);
+    try {
+      await deliver(entry('claude', join(ownerHome, '.claude'), false), 'wake');
+      const calls: unknown = JSON.parse(readFileSync(capture, 'utf8'));
+      assert.deepEqual(calls, [
+        { args: ['agents', '--json'], config: null, home: ownerHome },
+        {
+          args: [
+            '-p', '--resume', task, '--output-format', 'json',
+            '--permission-prompts', 'none', '--', 'wake',
+          ],
+          config: null,
+          home: ownerHome,
+        },
+      ]);
+      assert.equal(process.env.CLAUDE_CONFIG_DIR, join(directory, 'dispatcher-claude'));
+      assert.equal(process.env.HOME, dispatcherHome);
+    } finally {
+      delete process.env.REPOQ_CAPTURE;
+      if (previousClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+});
+
 test('Claude response must end with one result for the exact session and explicit success', async (context) => {
   const cases: readonly { readonly name: string; readonly output: unknown }[] = [
     { name: 'ordinary result without explicit success', output: { session_id: task } },
