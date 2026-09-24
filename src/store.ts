@@ -20,6 +20,7 @@ import {
   providers,
   queueStates,
   type AddEntryInput,
+  type AdministrativeCompletion,
   type Entry,
   type Provider,
 } from "./types.ts";
@@ -689,6 +690,53 @@ export class Store {
     });
   }
 
+  administrativeCandidate(id: string, suppliedToken: string): Entry {
+    const entry = this.owned(id, suppliedToken);
+    if (entry.provider !== "github" || entry.state !== "reserved" ||
+      !["failed", "uncertain"].includes(entry.delivery_status)) {
+      throw new StateError("administrative completion requires a failed or uncertain reserved GitHub entry");
+    }
+    return entry;
+  }
+
+  completeMerged(id: string, suppliedToken: string, reason: string, verifiedUrl: string, mergedAt: string): Entry {
+    const auditReason = boundedString(reason, "administrative completion reason", MAX_MESSAGE_LENGTH);
+    if (!auditReason.trim()) throw new TypeError("administrative completion reason must be non-empty");
+    const verified = pullRequest(verifiedUrl);
+    if (verified.provider !== "github" || !mergedAt.trim() || mergedAt.length > MAX_TIMESTAMP_LENGTH) {
+      throw new TypeError("administrative completion requires verified GitHub merge metadata");
+    }
+    return this.write(() => {
+      const entry = this.administrativeCandidate(id, suppliedToken);
+      if (entry.url !== verified.canonicalUrl) throw new StateError("verified PR does not match the reserved entry");
+      if (entry.token && auditReason.includes(entry.token)) throw new TypeError("administrative completion reason must not contain the ownership token");
+      const completedAt = now();
+      this.database.prepare(`
+        INSERT INTO administrative_completions (entry_id, reason, verified_url, merged_at, completed_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(entry.id, auditReason, verified.canonicalUrl, mergedAt, completedAt);
+      this.database.prepare("UPDATE entries SET state = 'done', updated_at = ? WHERE id = ?")
+        .run(completedAt, entry.id);
+      return this.updated(entry.id);
+    });
+  }
+
+  administrativeCompletions(): AdministrativeCompletion[] {
+    return this.database.prepare(`
+      SELECT entry_id, reason, verified_url, merged_at, completed_at
+      FROM administrative_completions ORDER BY completed_at
+    `).all().map((value) => {
+      const row = record(value);
+      return {
+        entry_id: storedString(row, "entry_id", MAX_TASK_LENGTH),
+        reason: storedString(row, "reason", MAX_MESSAGE_LENGTH),
+        verified_url: storedString(row, "verified_url", MAX_URL_LENGTH),
+        merged_at: storedString(row, "merged_at", MAX_TIMESTAMP_LENGTH),
+        completed_at: storedString(row, "completed_at", MAX_TIMESTAMP_LENGTH),
+      };
+    });
+  }
+
   block(id: string, suppliedToken: string, reason: string): Entry {
     const validatedReason = boundedString(reason, "block reason", MAX_MESSAGE_LENGTH);
     if (validatedReason.trim().length === 0) {
@@ -884,6 +932,13 @@ export class Store {
         CREATE TABLE IF NOT EXISTS entry_checkpoints (
           entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
           path TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS administrative_completions (
+          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+          reason TEXT NOT NULL,
+          verified_url TEXT NOT NULL,
+          merged_at TEXT NOT NULL,
+          completed_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS owner_configs (
           entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,

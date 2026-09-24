@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +26,20 @@ function object(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
   assert.ok(typeof value === 'object' && value !== null && !Array.isArray(value));
   return Object.fromEntries(Object.entries(value));
+}
+
+function mergedFixture(directory: string, response: Record<string, unknown>): NodeJS.ProcessEnv {
+  writeFileSync(join(directory, 'gh'), `#!${process.execPath}
+if (process.env.REPOQ_GH_ARGS_PATH) {
+  require('node:fs').writeFileSync(process.env.REPOQ_GH_ARGS_PATH, JSON.stringify(process.argv.slice(2)));
+}
+if (process.env.REPOQ_GH_FAIL) process.exit(1);
+process.stdout.write(process.env.REPOQ_GH_RESPONSE);
+`, { mode: 0o700 });
+  return {
+    PATH: `${directory}${delimiter}${cliEnvironment.PATH ?? ''}`,
+    REPOQ_GH_RESPONSE: JSON.stringify(response),
+  };
 }
 
 test('CLI registers an original conversation and rejects unsupported options without adding work', () => {
@@ -175,6 +189,146 @@ test('CLI refuses recovery without a quiescence assertion', () => {
     const result = run(['--state', directory, 'recover', randomUUID(), '--token', 'token']);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /requires --quiescent/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('administrative completion verifies an exact merged PR and audits a failed reserved turn', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-complete-merged-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    const url = 'https://github.com/example/project/pull/188';
+    const added = store.add({ url, agent: 'codex', task: randomUUID(), cwd: directory });
+    store.add({ url: 'https://github.com/example/project/pull/189', agent: 'codex', task: randomUUID(), cwd: directory });
+    const reserved = store.reserve()[0];
+    assert.equal(reserved?.id, added.id);
+    assert.ok(reserved.token);
+    store.beginDelivery(reserved.id, reserved.token);
+    store.delivery(reserved.id, reserved.token, false, 'native sender rejected the owner');
+    const environment = mergedFixture(directory, {
+      state: 'MERGED', mergedAt: '2026-09-22T04:26:56Z', url,
+    });
+    const argsPath = join(directory, 'gh-args.json');
+    environment.REPOQ_GH_ARGS_PATH = argsPath;
+
+    const completed = run([
+      '--state', state, 'complete-merged', reserved.id, `--token=${reserved.token}`,
+      '--quiescent', '--reason', 'Original owner is unreachable; PR already merged',
+    ], environment);
+    assert.equal(completed.status, 0, completed.stderr);
+    const result = object(completed.stdout);
+    assert.equal(result.state, 'done');
+    assert.equal(result.entry_id, reserved.id);
+    assert.equal(completed.stdout.includes(reserved.token), false);
+    assert.deepEqual(JSON.parse(readFileSync(argsPath, 'utf8')),
+      ['pr', 'view', url, '--json', 'state,mergedAt,url']);
+    const audit = result.administrative_completion;
+    assert.ok(typeof audit === 'object' && audit !== null);
+    assert.deepEqual(audit, {
+      entry_id: reserved.id,
+      reason: 'Original owner is unreachable; PR already merged',
+      verified_url: url,
+      merged_at: '2026-09-22T04:26:56Z',
+      completed_at: Reflect.get(audit, 'completed_at'),
+    });
+    assert.ok(!Number.isNaN(Date.parse(String(Reflect.get(audit, 'completed_at')))));
+    assert.equal(store.list().find((entry) => entry.id === reserved.id)?.state, 'done');
+    assert.equal(store.reserve().length, 1);
+    const status = run(['--state', state, 'status']);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal((object(status.stdout).administrative_completions as unknown[]).length, 1);
+    store.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('administrative completion rejects unmerged PRs, live delivery, and an active owner', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-complete-merged-guards-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    const url = 'https://github.com/example/project/pull/190';
+    store.add({ url, agent: 'codex', task: randomUUID(), cwd: directory });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    store.beginDelivery(reserved.id, reserved.token);
+    store.delivery(reserved.id, reserved.token, false, 'native sender rejected the owner');
+    const args = [
+      '--state', state, 'complete-merged', reserved.id, `--token=${reserved.token}`,
+      '--quiescent', '--reason', 'Original owner is unreachable',
+    ];
+    const merged = mergedFixture(directory, { state: 'MERGED', mergedAt: '2026-09-22T04:26:56Z', url });
+    const noAssertion = run(args.filter((arg) => arg !== '--quiescent'), merged);
+    assert.equal(noAssertion.status, 1);
+    assert.match(noAssertion.stderr, /requires --quiescent/);
+    const wrongToken = run(args.map((arg) => arg === `--token=${reserved.token}` ? '--token=wrong' : arg), merged);
+    assert.equal(wrongToken.status, 1);
+    assert.match(wrongToken.stderr, /stale or invalid ownership token/);
+    for (const response of [
+      { state: 'OPEN', mergedAt: null, url },
+      { state: 'MERGED', mergedAt: '2026-09-22T04:26:56Z', url: 'https://github.com/example/project/pull/191' },
+    ]) {
+      const result = run(args, { ...merged, REPOQ_GH_RESPONSE: JSON.stringify(response) });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /did not confirm the exact saved PR as merged/);
+    }
+    const remoteError = run(args, { ...merged, REPOQ_GH_FAIL: '1' });
+    assert.equal(remoteError.status, 1);
+    assert.match(remoteError.stderr, /GitHub merge verification failed/);
+    const ledger = new DeliveryLedger(state);
+    const attempt = ledger.admit(reserved, process.pid);
+    assert.ok(attempt);
+    const activeDelivery = run(args, merged);
+    assert.equal(activeDelivery.status, 1);
+    assert.match(activeDelivery.stderr, /Delivery attempt is active or unreconciled/);
+    ledger.release(attempt);
+    ledger.close();
+    assert.equal(store.list()[0]?.state, 'reserved');
+    assert.deepEqual(store.administrativeCompletions(), []);
+    store.claim(reserved.id, reserved.token);
+    const activeOwner = run(args, merged);
+    assert.equal(activeOwner.status, 1);
+    assert.match(activeOwner.stderr, /requires a failed or uncertain reserved GitHub entry/);
+    assert.deepEqual(store.administrativeCompletions(), []);
+    store.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('administrative completion cannot finish after a concurrent token rotation', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-complete-merged-race-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    const url = 'https://github.com/example/project/pull/192';
+    store.add({ url, agent: 'codex', task: randomUUID(), cwd: directory });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    store.beginDelivery(reserved.id, reserved.token);
+    store.delivery(reserved.id, reserved.token, false, 'native sender rejected the owner');
+    const environment = mergedFixture(directory, {
+      state: 'MERGED', mergedAt: '2026-09-22T04:26:56Z', url,
+    });
+    writeFileSync(join(directory, 'gh'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const changed = spawnSync(process.execPath, [${JSON.stringify(cli)}, '--state', process.env.REPOQ_TEST_STATE,
+  'retry', process.env.REPOQ_TEST_ID, '--token=' + process.env.REPOQ_TEST_TOKEN]);
+if (changed.status !== 0) process.exit(1);
+process.stdout.write(process.env.REPOQ_GH_RESPONSE);
+`, { mode: 0o700 });
+    const result = run([
+      '--state', state, 'complete-merged', reserved.id, `--token=${reserved.token}`,
+      '--quiescent', '--reason', 'Original owner is unreachable',
+    ], {
+      ...environment,
+      REPOQ_TEST_STATE: state,
+      REPOQ_TEST_ID: reserved.id,
+      REPOQ_TEST_TOKEN: reserved.token,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /stale or invalid ownership token/);
+    assert.equal(store.list()[0]?.state, 'reserved');
+    assert.equal(store.list()[0]?.delivery_status, 'pending');
+    assert.deepEqual(store.administrativeCompletions(), []);
+    store.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

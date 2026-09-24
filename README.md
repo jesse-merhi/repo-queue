@@ -63,6 +63,8 @@ repo-queue recover ENTRY_ID --token=TOKEN --quiescent
 
 Blocking retains the turn. Use `retry` after fixing a notification failure before claim. Use `recover` only after confirming that the old owner and its remote jobs have stopped. Both replace the token, so delayed messages cannot take over using an old token. Nothing releases a reservation merely because time passed.
 
+For an unclaimable reserved GitHub entry whose PR is already merged, `complete-merged ID --token=TOKEN --quiescent --reason TEXT` verifies the exact remote merge and records why the turn was administratively completed. It requires a failed or uncertain delivery, no active delivery attempt, and a confirmed idle owner; it never merges a PR. See [operations](docs/operations.md#complete-an-unclaimable-merged-turn).
+
 See [operations](docs/operations.md) for failure recovery, logs and shutdown.
 
 ## Supported agents

@@ -39,6 +39,17 @@ repo-queue reconcile-delivery ENTRY_ID --token=TOKEN --quiescent
 
 This command refuses live tracked processes and only clears the orphaned delivery accounting. It does not change the entry's state or token, release its repository reservation, send a wake, or authorize a claim. It also works for completed entries. If a new notification is still needed, follow the separate retry or recovery procedure above. Do not remove the ledger database to free slots.
 
+### Complete an unclaimable merged turn
+
+If the original owner cannot receive a wake, the saved GitHub PR is already merged, and the entry remains reserved after a failed or uncertain notification, first verify that the owner and its remote work are stopped. Check `status` for a delivery attempt; reconcile an orphaned slot separately as above. The CLI cannot inspect whether a Codex or Claude model turn is active, so `--quiescent` is your explicit assertion based on the original task and process state.
+
+```sh
+repo-queue complete-merged ENTRY_ID --token=TOKEN --quiescent \
+  --reason 'Original owner is unreachable; verified PR already merged'
+```
+
+This GitHub-only command uses the installed `gh` CLI to verify that the exact saved PR is merged. It refuses an open or mismatched PR, a claimed or blocked owner, a pending or accepted wake, and any active or unreconciled delivery attempt. It rechecks the current token and queue state before atomically marking the entry done. `status.administrative_completions` retains the reason, verified URL, merge time, and completion time. Keep secrets out of the reason. The command does not merge the PR, authorize new work, or transfer ownership of another entry. If remote verification or quiescence is uncertain, leave the reservation in place and investigate.
+
 
 ## Shutdown and restart
 

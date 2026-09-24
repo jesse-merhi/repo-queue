@@ -6,6 +6,7 @@ import { parseArgs, promisify } from 'node:util';
 import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { running, serve, start, stop } from './dispatcher.ts';
+import { verifyMergedGithub } from './merged-pr.ts';
 import { Store } from './store.ts';
 import type { Agent } from './types.ts';
 
@@ -28,6 +29,8 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
                                  Recover only after old work has stopped
   reconcile-delivery ID --token=TOKEN --quiescent
                                  Clear a confirmed orphaned spawn window
+  complete-merged ID --token=TOKEN --quiescent --reason TEXT
+                                 Complete an unclaimable, already-merged GitHub turn
   doctor [--agent codex|claude]    Check runtime and agent executable access
   --version                      Print installed version
 
@@ -48,6 +51,7 @@ const allowed: Record<string, readonly string[]> = {
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
   retry: ['token'], recover: ['token', 'quiescent'],
   'reconcile-delivery': ['token', 'quiescent'], doctor: ['agent'],
+  'complete-merged': ['token', 'quiescent', 'reason'],
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function required(value: string | undefined, name: string): string {
@@ -92,7 +96,7 @@ export async function main(args: string[]): Promise<void> {
     for (const name of Object.keys(values)) {
       if (name !== 'state' && !permitted.includes(name)) throw new Error(`--${name} is not supported by ${command}`);
     }
-    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery'].includes(command);
+    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery', 'complete-merged'].includes(command);
     if (positionals.length !== (hasOperand ? 2 : 1)) throw new Error(`${command} expects ${hasOperand ? 'one argument' : 'no arguments'}`);
     const state = statePath(values.state ?? process.env.REPO_QUEUE_STATE ?? resolve(homedir(), '.local/state/repo-queue'));
     let result: unknown;
@@ -122,6 +126,7 @@ export async function main(args: string[]): Promise<void> {
               entries,
               delivery_alerts: overdueCodexClaims(entries),
               delivery_attempts: ledger.list(),
+              administrative_completions: store.administrativeCompletions(),
             };
           } finally { ledger.close(); }
           break;
@@ -170,6 +175,29 @@ export async function main(args: string[]): Promise<void> {
             const ledger = new DeliveryLedger(state);
             try {
               result = ledger.reconcileUnknown(id, true, () => ownerStore.verifyOwnership(id, token));
+            } finally { ledger.close(); }
+            break;
+          }
+          case 'complete-merged': {
+            if (!values.quiescent) throw new Error('Administrative completion requires --quiescent: confirm the owner and remote work have stopped');
+            const reason = required(values.reason, '--reason');
+            const entry = store.administrativeCandidate(id, token);
+            const ledger = new DeliveryLedger(state);
+            try {
+              const noAttempt = (): void => {
+                if (ledger.list().some((attempt) => attempt.entry_id === id)) {
+                  throw new Error('Delivery attempt is active or unreconciled; resolve it before administrative completion');
+                }
+              };
+              noAttempt();
+              const merged = await verifyMergedGithub(entry);
+              noAttempt();
+              const completed = store.completeMerged(id, token, reason, merged.url, merged.mergedAt);
+              result = {
+                entry_id: completed.id,
+                state: completed.state,
+                administrative_completion: store.administrativeCompletions().find((audit) => audit.entry_id === id),
+              };
             } finally { ledger.close(); }
             break;
           }

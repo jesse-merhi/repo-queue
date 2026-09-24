@@ -831,6 +831,49 @@ describe("Store", () => {
     item.store.close();
   });
 
+  test("administrative completion accepts an uncertain GitHub turn only with exact proof", () => {
+    const item = fixture();
+    const url = "https://github.com/acme/widget/pull/193";
+    add(item, url);
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    assert.throws(() => item.store.administrativeCandidate(reserved.id, ownerToken), StateError);
+    assert.equal(item.store.beginDelivery(reserved.id, ownerToken), true);
+    assert.equal(item.store.markUncertain(), 1);
+    assert.equal(item.store.administrativeCandidate(reserved.id, ownerToken).delivery_status, "uncertain");
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, "owner unreachable", "https://github.com/acme/widget/pull/194", "2026-09-22T04:26:56Z",
+    ), StateError);
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, `token ${ownerToken}`, url, "2026-09-22T04:26:56Z",
+    ), /must not contain the ownership token/);
+    assert.deepEqual(item.store.administrativeCompletions(), []);
+    const completed = item.store.completeMerged(
+      reserved.id, ownerToken, "owner unreachable", url, "2026-09-22T04:26:56Z",
+    );
+    assert.equal(completed.state, "done");
+    assert.equal(item.store.administrativeCompletions()[0]?.reason, "owner unreachable");
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, "second completion", url, "2026-09-22T04:26:56Z",
+    ), StateError);
+    item.store.close();
+    const reopened = new Store(item.stateDir);
+    assert.equal(reopened.administrativeCompletions()[0]?.verified_url, url);
+    reopened.close();
+  });
+
+  test("administrative completion rejects a failed Bitbucket turn", () => {
+    const item = fixture();
+    add(item, "https://bitbucket.org/acme/widget/pull-requests/194");
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    item.store.beginDelivery(reserved.id, ownerToken);
+    item.store.delivery(reserved.id, ownerToken, false, "delivery rejected");
+    assert.throws(() => item.store.administrativeCandidate(reserved.id, ownerToken), StateError);
+    assert.equal(item.store.list()[0]?.state, "reserved");
+    item.store.close();
+  });
+
   test("construction leaves in-flight sends unchanged until explicit reconciliation", () => {
     const item = fixture();
     add(item, "https://github.com/acme/widget/pull/1");

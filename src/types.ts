@@ -54,3 +54,11 @@ export interface AddEntryInput {
   desktop?: boolean;
   checkpoint_path?: string;
 }
+
+export interface AdministrativeCompletion {
+  entry_id: string;
+  reason: string;
+  verified_url: string;
+  merged_at: string;
+  completed_at: string;
+}
