@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   claudeSenderPrompt,
   resolveClaudeLiveAddress,
@@ -19,7 +20,8 @@ export interface DeliveryProcessLifecycle {
   spawned(pid: number): void;
 }
 
-function unrefHandle(handle: object): void {
+function unrefHandle(handle: object | null): void {
+  if (handle === null) return;
   const unref = Reflect.get(handle, 'unref');
   if (typeof unref === 'function') unref.call(handle);
 }
@@ -52,6 +54,10 @@ async function run(
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    let processError: Error | undefined;
+    child.once('error', (error) => {
+      processError = error;
+    });
     const release = (): void => {
       child.unref();
       unrefHandle(child.stdout);
@@ -65,7 +71,6 @@ async function run(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let overflow = false;
-    let processError: Error | undefined;
 
     const append = (destination: Buffer[], chunk: Buffer, currentBytes: number): number => {
       const remaining = maximumOutputBytes - currentBytes;
@@ -76,11 +81,8 @@ async function run(
       }
       return currentBytes + chunk.byteLength;
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
-    child.stderr.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
-    child.once('error', (error) => {
-      processError ??= error;
-    });
+    child.stdout?.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
     child.once('close', (code, signal) => {
       options.releaseSignal?.removeEventListener('abort', release);
       const result = {
@@ -100,8 +102,7 @@ async function run(
 
     const childPid = child.pid;
     if (childPid === undefined) {
-      processError = new Error(`${options.label} did not report a child process ID`);
-      child.kill('SIGKILL');
+      processError ??= new Error(`${options.label} did not report a child process ID`);
     } else {
       try {
         options.lifecycle?.spawned(childPid);
@@ -229,6 +230,29 @@ export async function deliver(
       },
     );
     verifyClaudeResult(result.stdout, entry.task);
+  } catch (error) {
+    throw redact(error, entry.token);
+  }
+}
+
+/** Load the exact desktop task so it can consume the message already accepted by `codex queue`. */
+export async function activateCodexTask(
+  entry: Entry,
+  releaseSignal?: AbortSignal,
+  lifecycle?: DeliveryProcessLifecycle,
+  platform = process.platform,
+): Promise<void> {
+  if (
+    entry.agent !== 'codex' || entry.desktop !== true || platform !== 'darwin' ||
+    entry.owner_config_root !== join(homedir(), '.codex')
+  ) return;
+  try {
+    await run('open', ['-g', `codex://threads/${entry.task}`], {
+      timeoutMs: 10_000,
+      ...(releaseSignal === undefined ? {} : { releaseSignal }),
+      ...(lifecycle === undefined ? {} : { lifecycle }),
+      label: 'Codex desktop activation request',
+    });
   } catch (error) {
     throw redact(error, entry.token);
   }

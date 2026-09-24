@@ -3,17 +3,21 @@ import { execFile, spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { delimiter, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { codexClaimGraceMs } from '../src/claim-watch.ts';
 import { running, start, stop, wakeMessage } from '../src/dispatcher.ts';
 import { Store } from '../src/store.ts';
 import type { Agent, Entry } from '../src/types.ts';
@@ -52,6 +56,7 @@ function add(
   task: string,
   agent: Agent = 'codex',
   ownerConfigRoot?: string,
+  desktop = false,
 ): Entry {
   const store = new Store(state);
   try {
@@ -61,6 +66,7 @@ function add(
       task,
       cwd: root,
       ...(ownerConfigRoot === undefined ? {} : { owner_config_root: ownerConfigRoot }),
+      ...(desktop ? { desktop: true } : {}),
     });
   } finally {
     store.close();
@@ -75,6 +81,7 @@ async function fixture(run: (root: string, state: string, environment: NodeJS.Pr
     PATH: `${root}${delimiter}${process.env.PATH ?? ''}`,
     REPOQ_FIXTURE: root,
   };
+  executable(root, 'open', '');
   try {
     await run(root, state, environment);
   } finally {
@@ -165,6 +172,161 @@ test('an immediate CLI restart replaces the stopped dispatcher and delivers late
 
     await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after immediate restart');
     assert.equal(await running(state), true);
+  });
+});
+
+test('a removed owner directory fails delivery without crashing or orphaning its slot', async () => {
+  await fixture(async (root, state, environment) => {
+    executable(root, 'codex', `process.exit(0);`);
+    const owner = join(root, 'owner');
+    mkdirSync(owner);
+    const queued = add(state, owner, 946, '10000000-0000-4000-8000-000000000946');
+    rmdirSync(owner);
+
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try { return store.list().find((entry) => entry.id === queued.id)?.delivery_status === 'failed'; }
+      finally { store.close(); }
+    }, 'failed delivery after owner directory removal');
+    assert.equal(await running(state), true);
+    const status = await command(state, ['status'], environment) as { delivery_attempts: unknown[] };
+    assert.deepEqual(status.delivery_attempts, []);
+    const store = new Store(state);
+    try {
+      const current = store.list().find((entry) => entry.id === queued.id);
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.token, queued.token);
+      assert.match(current?.delivery_error ?? '', /ENOENT/);
+    } finally { store.close(); }
+  });
+});
+
+test('dispatcher reports one overdue Codex claim without resending or changing ownership', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    writeFileSync(messages, '');
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', JSON.stringify(process.argv.slice(2)) + '\\n');
+    `);
+    const queued = add(state, root, 942, '10000000-0000-4000-8000-000000000942');
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try { return store.list()[0]?.delivery_status === 'sent'; }
+      finally { store.close(); }
+    }, 'native acceptance');
+    const database = new DatabaseSync(join(state, 'queue.sqlite3'));
+    try {
+      database.prepare('UPDATE entries SET updated_at = ? WHERE id = ?').run(
+        new Date(Date.now() - codexClaimGraceMs - 1_000).toISOString(), queued.id,
+      );
+    } finally { database.close(); }
+
+    const log = join(state, 'dispatcher.log');
+    await until(() => existsSync(log) && readFileSync(log, 'utf8').includes('codex_claim_overdue'), 'overdue claim warning');
+    await delay(1_200);
+    const warnings = readFileSync(log, 'utf8').match(/codex_claim_overdue/g) ?? [];
+    assert.equal(warnings.length, 1);
+    assert.doesNotMatch(readFileSync(log, 'utf8'), new RegExp(queued.token ?? ''));
+    assert.equal(readFileSync(messages, 'utf8').trim().split('\n').length, 1);
+    const store = new Store(state);
+    try {
+      const current = store.list()[0];
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.token, queued.token);
+      assert.equal(current?.delivery_status, 'sent');
+      assert.equal(store.claim(queued.id, queued.token ?? '').state, 'claimed');
+    } finally { store.close(); }
+  });
+});
+
+test('failed desktop activation retains accepted delivery and alerts without retrying the wake', {
+  skip: process.platform !== 'darwin',
+}, async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    const activation = join(root, 'activation.json');
+    executable(root, 'codex', `
+      require('node:fs').appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'queued\\n');
+    `);
+    executable(root, 'open', `
+      const fs = require('node:fs');
+      const { DatabaseSync } = require('node:sqlite');
+      const database = new DatabaseSync(process.env.REPOQ_FIXTURE + '/state/queue.sqlite3');
+      const row = database.prepare('SELECT delivery_status FROM entries').get();
+      fs.writeFileSync(process.env.REPOQ_FIXTURE + '/activation.json', JSON.stringify({
+        args: process.argv.slice(2), status: row.delivery_status,
+      }));
+      database.close();
+      process.stderr.write('desktop unavailable');
+      process.exit(1);
+    `);
+    const queued = add(state, root, 943, '10000000-0000-4000-8000-000000000943',
+      'codex', join(homedir(), '.codex'), true);
+    await command(state, ['start'], environment);
+    await until(() => existsSync(activation), 'desktop activation request');
+    await until(async () => {
+      const status = await command(state, ['status'], environment);
+      return JSON.stringify(status).includes('codex_activation_request_failed');
+    }, 'activation failure alert');
+    assert.deepEqual(JSON.parse(readFileSync(activation, 'utf8')), {
+      args: ['-g', `codex://threads/${queued.task}`], status: 'sent',
+    });
+    const store = new Store(state);
+    try {
+      const current = store.list()[0];
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.delivery_status, 'sent');
+      assert.equal(current?.token, queued.token);
+      assert.match(current?.delivery_error ?? '', /desktop unavailable/);
+      assert.equal(store.claim(queued.id, queued.token ?? '').state, 'claimed');
+      const status = await command(state, ['status'], environment);
+      assert.deepEqual((status as { delivery_alerts: unknown }).delivery_alerts, []);
+    } finally { store.close(); }
+    await delay(1_200);
+    assert.equal(readFileSync(messages, 'utf8').trim().split('\n').length, 1);
+  });
+});
+
+test('a different dispatcher HOME can read and deliver a shared desktop and Claude queue', async () => {
+  await fixture(async (root, state, environment) => {
+    const desktopTask = '10000000-0000-4000-8000-000000000944';
+    const claudeTask = '10000000-0000-4000-8000-000000000945';
+    const messages = join(root, 'messages');
+    const opened = join(root, 'opened');
+    executable(root, 'codex', `
+      require('node:fs').appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'desktop queued\\n');
+    `);
+    executable(root, 'claude', `
+      const fs = require('node:fs');
+      if (process.argv[2] === 'agents') process.stdout.write('[]');
+      else {
+        fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'claude resumed\\n');
+        process.stdout.write(JSON.stringify({ type: 'result', session_id: '${claudeTask}', is_error: false }));
+      }
+    `);
+    executable(root, 'open', `require('node:fs').writeFileSync(process.env.REPOQ_FIXTURE + '/opened', 'wrong desktop');`);
+    const desktop = add(state, root, 944, desktopTask, 'codex', join(homedir(), '.codex'), true);
+    const claude = add(state, root, 945, claudeTask, 'claude');
+    environment.HOME = join(root, 'reader-home');
+    const before = await command(state, ['status'], environment);
+    assert.equal((before as { entries: Entry[] }).entries.length, 2);
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try {
+        const entries = store.list();
+        return entries.find((entry) => entry.id === desktop.id)?.delivery_status === 'sent' &&
+          entries.find((entry) => entry.id === claude.id)?.delivery_status === 'sent';
+      } finally { store.close(); }
+    }, 'both native deliveries');
+    assert.equal(existsSync(opened), false);
+    assert.deepEqual(readFileSync(messages, 'utf8').trim().split('\n').sort(),
+      ['claude resumed', 'desktop queued']);
+    const after = await command(state, ['status'], environment);
+    assert.equal((after as { entries: Entry[] }).entries.length, 2);
   });
 });
 

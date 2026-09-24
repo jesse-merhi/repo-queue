@@ -4,7 +4,9 @@
 
 `repo-queue status` returns JSON containing dispatcher status and each entry's PR, owner, state, delivery status and recovery token. Its `delivery_attempts` list identifies retained slots by entry ID, dispatcher PID and child PID; a null child PID means the process was not yet recorded. Status also reaps tracked attempts whose dispatcher and child are both known to have exited. Store the output privately. `repo-queue doctor --agent codex` or `--agent claude` checks executable availability.
 
-A successful notification means the adapter accepted a queued message, completed a resume command, or received a successful native Claude `SendMessage` result. The owner must still claim its turn. Codex may accept a message while the desktop is unavailable; Claude may hold or refuse a message under its inbound settings. Native send success does not distinguish those outcomes. The reservation remains held until the owner acts or it is explicitly recovered.
+A successful notification means the adapter accepted a queued message, completed a resume command, or received a successful native Claude `SendMessage` result. The owner must still claim its turn. A macOS Codex desktop owner using the default `CODEX_HOME` opts in with `repo-queue add ... --desktop`. After Codex accepts that owner's message, RepoQ asks LaunchServices to open `codex://threads/<original task UUID>` in the background. This loads the exact desktop task so it can consume the already queued message; it sends no second prompt and keeps the same reservation and token. `open -g` can still change the selected task in the desktop window. CLI owners, custom `CODEX_HOME` owners, and Linux retain native queue acceptance plus the unclaimed alert. Claude may hold or refuse a message under its inbound settings. Neither native acceptance nor a successful desktop activation request proves that the owner loaded or claimed. The reservation remains held until the owner acts or it is explicitly recovered.
+
+If the macOS activation request fails after native acceptance, `status` immediately includes `codex_activation_request_failed` in `delivery_alerts`; the queued message and reservation remain intact. For a Codex reservation still unclaimed five minutes after native acceptance, `status` includes `codex_claim_overdue`; the dispatcher writes one warning per accepted wake to its private log during that run. Five minutes is an attention threshold, not a delivery guarantee. These alerts show a claim gap, not proof that the wake was lost. Inspect the exact original task through the Codex app. If it is `notLoaded`, send one follow-up to that same task and confirm that it claims the existing entry. Do not launch a second owner, rotate its token, or repeat native sends while an earlier wake may still run. The alert disappears as soon as the original task claims, blocks, or completes. RepoQ cannot send an app notification from its standalone dispatcher; check `status` or the private dispatcher log when a turn seems stuck.
 
 ## Recover a failed notification
 
@@ -18,6 +20,8 @@ repo-queue verify-claim ENTRY_ID --token=TOKEN \
 Use the actual current conversation identity (`--agent claude` for Claude). The read-only command succeeds only for the matching owner, token and claimed state. Continue the saved workflow and account for jobs already running. A duplicate wake does not cancel an existing claim. A blocked entry still needs explicit recovery; verification does not unblock it.
 
 Resolve authentication, missing executables, moved directories or incompatible native Claude messaging, then use `retry ID --token=TOKEN`. For a live Claude session, inspect its inbound-message notices: it may hold or refuse messages from the sender's normal configured permission mode. Do not change global settings, terminate the session or repeatedly retry to force delivery. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
+
+If an owner's saved working directory was removed, delivery fails with `ENOENT` and retains the reservation. Restore that exact directory only when its original work has already been accounted for; registration cannot retarget an existing entry to another directory. Confirm the owner and any remote work are quiescent before retrying.
 
 When the owner has already claimed or blocked, use `recover ID --token=TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.
 
@@ -34,6 +38,17 @@ repo-queue reconcile-delivery ENTRY_ID --token=TOKEN --quiescent
 ```
 
 This command refuses live tracked processes and only clears the orphaned delivery accounting. It does not change the entry's state or token, release its repository reservation, send a wake, or authorize a claim. It also works for completed entries. If a new notification is still needed, follow the separate retry or recovery procedure above. Do not remove the ledger database to free slots.
+
+### Complete an unclaimable merged turn
+
+If the original owner cannot receive a wake, the saved GitHub PR is already merged, and the entry remains reserved after a failed or uncertain notification, first verify that the owner and its remote work are stopped. Check `status` for a delivery attempt; reconcile an orphaned slot separately as above. The CLI cannot inspect whether a Codex or Claude model turn is active, so `--quiescent` is your explicit assertion based on the original task and process state.
+
+```sh
+repo-queue complete-merged ENTRY_ID --token=TOKEN --quiescent \
+  --reason 'Original owner is unreachable; verified PR already merged'
+```
+
+This GitHub-only command uses the installed `gh` CLI to verify that the exact saved PR is merged. It refuses an open or mismatched PR, a claimed or blocked owner, a pending or accepted wake, and any active or unreconciled delivery attempt. It rechecks the current token and queue state before atomically marking the entry done. `status.administrative_completions` retains the reason, verified URL, merge time, and completion time. Keep secrets out of the reason. The command does not merge the PR, authorize new work, or transfer ownership of another entry. If remote verification or quiescence is uncertain, leave the reservation in place and investigate.
 
 
 ## Shutdown and restart

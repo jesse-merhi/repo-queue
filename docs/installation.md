@@ -46,6 +46,10 @@ State defaults to `~/.local/state/repo-queue`. Set `REPO_QUEUE_STATE` or pass `-
 
 Register each PR from its original harness environment. New entries retain that owner's configuration directory (`CODEX_HOME` or `CLAUDE_CONFIG_DIR`, including the default when unset). Claude entries also retain whether `CLAUDE_CONFIG_DIR` was explicit. Relative roots resolve against the original worktree. One dispatcher can serve separate harness installations. Delivery uses the saved directory and, for Claude, its saved environment mode; it does not copy credentials or change global settings. This distinction matters because Claude keys macOS Keychain credentials by `CLAUDE_CONFIG_DIR`, even when an explicit value resolves to `~/.claude`. Legacy entries keep their previous behavior because the saved path alone cannot prove whether the variable was explicit. Existing Python entries lacking owner configuration metadata continue using the dispatcher's configuration until completed.
 
+## Upgrade an existing Node dispatcher
+
+The desktop activation flag adds a default-off column to the existing database version, so older Node commands can still read the state. An already-running dispatcher keeps its old code and will not activate newly opted-in desktop entries. Stop it with the old command and verify `repo-queue status` reports `dispatcher_running: false`. Install the new package and matching skill, then start the new dispatcher and compare the entry IDs, tokens, order and states with the saved status. `repo-queue start` alone does not replace a running dispatcher. Previously accepted, unclaimed wakes are not reactivated during upgrade; inspect their exact original tasks before intervening. Do not rotate tokens or resend them solely because the dispatcher changed.
+
 ## Upgrade from the Python preview
 
 The TypeScript version reads the existing SQLite entries without changing IDs, order or tokens. Its dispatcher lock differs, so never run both dispatchers on one state directory.

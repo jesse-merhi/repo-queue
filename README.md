@@ -39,7 +39,7 @@ repo-queue add https://bitbucket.org/example/project/pull-requests/7 \
 repo-queue status
 ```
 
-For a prepared review/merge workflow, add `--checkpoint /absolute/path/to/continuation.md`. RepoQ retains that file's path across wakes and recovery. The file links the reviewed candidate, impact assessment or pending review assignment, validation evidence, running jobs and next action. The agent writes and maintains it; RepoQ does not decide what code needs review. See [continuation guidance](skills/repo-queue/references/continuation.md).
+For a macOS Codex desktop task using the default `CODEX_HOME`, add `--desktop` to load that exact task after native queue acceptance. CLI owners and custom-home tasks omit this flag. For a prepared review/merge workflow, add `--checkpoint /absolute/path/to/continuation.md`. RepoQ retains that file's path across wakes and recovery. The file links the reviewed candidate, impact assessment or pending review assignment, validation evidence, running jobs and next action. The agent writes and maintains it; RepoQ does not decide what code needs review. See [continuation guidance](skills/repo-queue/references/continuation.md).
 
 The agent saves the returned entry ID and token, then ends its turn. The dispatcher sends the original conversation a message containing concrete commands:
 
@@ -62,6 +62,8 @@ repo-queue recover ENTRY_ID --token=TOKEN --quiescent
 ```
 
 Blocking retains the turn. Use `retry` after fixing a notification failure before claim. Use `recover` only after confirming that the old owner and its remote jobs have stopped. Both replace the token, so delayed messages cannot take over using an old token. Nothing releases a reservation merely because time passed.
+
+For an unclaimable reserved GitHub entry whose PR is already merged, `complete-merged ID --token=TOKEN --quiescent --reason TEXT` verifies the exact remote merge and records why the turn was administratively completed. It requires a failed or uncertain delivery, no active delivery attempt, and a confirmed idle owner; it never merges a PR. See [operations](docs/operations.md#complete-an-unclaimable-merged-turn).
 
 See [operations](docs/operations.md) for failure recovery, logs and shutdown.
 

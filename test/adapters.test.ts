@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { deliver } from '../src/adapters.ts';
+import { activateCodexTask, deliver } from '../src/adapters.ts';
 import { claudePidDomain } from '../src/claude-messaging.ts';
 import type { Entry } from '../src/types.ts';
 
@@ -104,6 +104,53 @@ test('Codex receives the exact task and the wake message as one argument', async
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
     }
+  });
+});
+
+test('a removed owner directory rejects delivery before registering a child', async () => {
+  await fixture(async (directory) => {
+    executable(directory, 'codex', `process.exit(0);`);
+    const lifecycle: string[] = [];
+    await assert.rejects(
+      deliver({ ...entry('codex'), cwd: join(directory, 'removed-owner') }, 'wake', undefined, {
+        beforeSpawn: () => { lifecycle.push('before'); },
+        spawned: () => { lifecycle.push('spawned'); },
+      }),
+      /ENOENT/,
+    );
+    assert.deepEqual(lifecycle, ['before']);
+  });
+});
+
+test('macOS activation loads only the exact task through the desktop URL', async () => {
+  await fixture(async (directory) => {
+    const capture = join(directory, 'activation.json');
+    process.env.REPOQ_CAPTURE = capture;
+    executable(directory, 'open', `
+      require('node:fs').writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(process.argv.slice(2)));
+    `);
+    try {
+      await activateCodexTask({
+        ...entry('codex'), desktop: true, owner_config_root: join(homedir(), '.codex'),
+      }, undefined, undefined, 'darwin');
+      assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), ['-g', `codex://threads/${task}`]);
+    } finally {
+      delete process.env.REPOQ_CAPTURE;
+    }
+  });
+});
+
+test('Linux and Claude do not request desktop activation', async () => {
+  await fixture(async (directory) => {
+    executable(directory, 'open', `process.exit(1);`);
+    await activateCodexTask({
+      ...entry('codex'), desktop: true, owner_config_root: join(homedir(), '.codex'),
+    }, undefined, undefined, 'linux');
+    await activateCodexTask(entry('codex'), undefined, undefined, 'darwin');
+    await activateCodexTask({
+      ...entry('codex'), desktop: true, owner_config_root: join(directory, 'other-home', '.codex'),
+    }, undefined, undefined, 'darwin');
+    await activateCodexTask(entry('claude'), undefined, undefined, 'darwin');
   });
 });
 

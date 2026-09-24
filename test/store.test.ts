@@ -296,7 +296,7 @@ describe("Store", () => {
           assert.ok(typeof value.name === "string");
           return value.name;
         });
-      assert.deepEqual(columns, ["entry_id", "config_root", "env_explicit"]);
+      assert.deepEqual(columns, ["entry_id", "config_root", "env_explicit", "desktop"]);
       assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
       database.close();
     } finally {
@@ -306,6 +306,49 @@ describe("Store", () => {
       else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
       item.store.close();
     }
+  });
+
+  test("desktop activation requires explicit registration and the default Codex home", () => {
+    const item = fixture();
+    const previousCodexHome = process.env.CODEX_HOME;
+    try {
+      delete process.env.CODEX_HOME;
+      const input = {
+        url: "https://github.com/acme/desktop/pull/1",
+        agent: "codex" as const,
+        task: randomUUID(),
+        cwd: item.cwd,
+      };
+      const desktop = item.store.add({ ...input, desktop: true });
+      assert.equal(desktop.desktop, true);
+      assert.equal(item.store.list()[0]?.desktop, true);
+      assert.throws(() => item.store.add(input), ConflictError);
+      assert.equal(item.store.add({ ...input, desktop: true }).id, desktop.id);
+      process.env.CODEX_HOME = join(item.root, "custom-home");
+      assert.throws(() => item.store.add({
+        ...input, url: "https://github.com/acme/custom/pull/2", desktop: true,
+      }), /default CODEX_HOME/);
+      assert.equal(item.store.list().length, 1);
+      assert.throws(() => item.store.add({
+        ...input, url: "https://github.com/acme/claude/pull/3", agent: "claude", desktop: true,
+      }), /Codex owner/);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      item.store.close();
+    }
+  });
+
+  test("old queue entries migrate with desktop activation disabled", () => {
+    const item = fixture();
+    const existing = add(item, "https://github.com/acme/legacy-desktop/pull/1");
+    item.store.close();
+    const database = new DatabaseSync(join(item.stateDir, "queue.sqlite3"));
+    database.exec("ALTER TABLE owner_configs DROP COLUMN desktop; PRAGMA user_version = 3");
+    database.close();
+    const migrated = new Store(item.stateDir);
+    assert.equal(migrated.list().find((entry) => entry.id === existing.id)?.desktop, false);
+    migrated.close();
   });
 
   test("Codex ownership remains stable when delivery makes the default root explicit", () => {
@@ -788,6 +831,49 @@ describe("Store", () => {
     item.store.close();
   });
 
+  test("administrative completion accepts an uncertain GitHub turn only with exact proof", () => {
+    const item = fixture();
+    const url = "https://github.com/acme/widget/pull/193";
+    add(item, url);
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    assert.throws(() => item.store.administrativeCandidate(reserved.id, ownerToken), StateError);
+    assert.equal(item.store.beginDelivery(reserved.id, ownerToken), true);
+    assert.equal(item.store.markUncertain(), 1);
+    assert.equal(item.store.administrativeCandidate(reserved.id, ownerToken).delivery_status, "uncertain");
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, "owner unreachable", "https://github.com/acme/widget/pull/194", "2026-09-22T04:26:56Z",
+    ), StateError);
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, `token ${ownerToken}`, url, "2026-09-22T04:26:56Z",
+    ), /must not contain the ownership token/);
+    assert.deepEqual(item.store.administrativeCompletions(), []);
+    const completed = item.store.completeMerged(
+      reserved.id, ownerToken, "owner unreachable", url, "2026-09-22T04:26:56Z",
+    );
+    assert.equal(completed.state, "done");
+    assert.equal(item.store.administrativeCompletions()[0]?.reason, "owner unreachable");
+    assert.throws(() => item.store.completeMerged(
+      reserved.id, ownerToken, "second completion", url, "2026-09-22T04:26:56Z",
+    ), StateError);
+    item.store.close();
+    const reopened = new Store(item.stateDir);
+    assert.equal(reopened.administrativeCompletions()[0]?.verified_url, url);
+    reopened.close();
+  });
+
+  test("administrative completion rejects a failed Bitbucket turn", () => {
+    const item = fixture();
+    add(item, "https://bitbucket.org/acme/widget/pull-requests/194");
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    item.store.beginDelivery(reserved.id, ownerToken);
+    item.store.delivery(reserved.id, ownerToken, false, "delivery rejected");
+    assert.throws(() => item.store.administrativeCandidate(reserved.id, ownerToken), StateError);
+    assert.equal(item.store.list()[0]?.state, "reserved");
+    item.store.close();
+  });
+
   test("construction leaves in-flight sends unchanged until explicit reconciliation", () => {
     const item = fixture();
     add(item, "https://github.com/acme/widget/pull/1");
@@ -848,6 +934,22 @@ describe("Store", () => {
     assert.equal(persisted.state, "done");
     assert.equal(persisted.delivery_status, "failed");
     assert.equal(persisted.delivery_error, "late result");
+    item.store.close();
+  });
+
+  test("a late activation failure cannot overwrite an owner that already claimed", () => {
+    const item = fixture();
+    add(item, "https://github.com/acme/widget/pull/1");
+    const reserved = firstEntry(item.store.reserve());
+    const ownerToken = requireToken(reserved);
+    assert.equal(item.store.beginDelivery(reserved.id, ownerToken), true);
+    assert.equal(item.store.delivery(reserved.id, ownerToken, true), true);
+    const acceptedAt = firstEntry(item.store.list()).updated_at;
+    assert.equal(item.store.activationError(reserved.id, ownerToken, "desktop unavailable"), true);
+    assert.equal(firstEntry(item.store.list()).updated_at, acceptedAt);
+    assert.equal(item.store.claim(reserved.id, ownerToken).state, "claimed");
+    assert.equal(item.store.activationError(reserved.id, ownerToken, "late failure"), false);
+    assert.equal(firstEntry(item.store.list()).delivery_error, "desktop unavailable");
     item.store.close();
   });
 
