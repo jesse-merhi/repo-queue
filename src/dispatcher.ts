@@ -15,6 +15,7 @@ import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { deliver } from './adapters.ts';
+import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger, type DeliveryAttempt } from './delivery-ledger.ts';
 import { Store } from './store.ts';
 import type { Entry } from './types.ts';
@@ -254,12 +255,23 @@ export async function serve(state: string): Promise<void> {
   const store = new Store(stateDirectory);
   const admissionLedger = new DeliveryLedger(stateDirectory);
   const activeOwners = new Map<string, Promise<void>>();
+  const reportedClaims = new Map<string, string>();
   const deliveryLifecycle = new AbortController();
   try {
     store.markUncertain();
     while (!stopped()) {
       admissionLedger.reconcile();
       store.reserve();
+      const claimAlerts = overdueCodexClaims(store.acceptedCodexWakes());
+      const currentAlerts = new Set(claimAlerts.map((alert) => alert.entry_id));
+      for (const entryId of reportedClaims.keys()) {
+        if (!currentAlerts.has(entryId)) reportedClaims.delete(entryId);
+      }
+      for (const alert of claimAlerts) {
+        if (reportedClaims.get(alert.entry_id) === alert.accepted_at) continue;
+        reportedClaims.set(alert.entry_id, alert.accepted_at);
+        process.stderr.write(`repo-queue: ${alert.code} for entry ${alert.entry_id}, task ${alert.task}: ${alert.message}\n`);
+      }
       for (const entry of store.pendingNotifications()) {
         const owner = `${entry.agent}\0${entry.task}`;
         if (activeOwners.has(owner) || !entry.token) continue;

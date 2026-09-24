@@ -10,10 +10,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { delimiter, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { codexClaimGraceMs } from '../src/claim-watch.ts';
 import { running, start, stop, wakeMessage } from '../src/dispatcher.ts';
 import { Store } from '../src/store.ts';
 import type { Agent, Entry } from '../src/types.ts';
@@ -165,6 +167,46 @@ test('an immediate CLI restart replaces the stopped dispatcher and delivers late
 
     await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after immediate restart');
     assert.equal(await running(state), true);
+  });
+});
+
+test('dispatcher reports one overdue Codex claim without resending or changing ownership', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    writeFileSync(messages, '');
+    executable(root, 'codex', `
+      const fs = require('node:fs');
+      fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', JSON.stringify(process.argv.slice(2)) + '\\n');
+    `);
+    const queued = add(state, root, 942, '10000000-0000-4000-8000-000000000942');
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try { return store.list()[0]?.delivery_status === 'sent'; }
+      finally { store.close(); }
+    }, 'native acceptance');
+    const database = new DatabaseSync(join(state, 'queue.sqlite3'));
+    try {
+      database.prepare('UPDATE entries SET updated_at = ? WHERE id = ?').run(
+        new Date(Date.now() - codexClaimGraceMs - 1_000).toISOString(), queued.id,
+      );
+    } finally { database.close(); }
+
+    const log = join(state, 'dispatcher.log');
+    await until(() => existsSync(log) && readFileSync(log, 'utf8').includes('codex_claim_overdue'), 'overdue claim warning');
+    await delay(1_200);
+    const warnings = readFileSync(log, 'utf8').match(/codex_claim_overdue/g) ?? [];
+    assert.equal(warnings.length, 1);
+    assert.doesNotMatch(readFileSync(log, 'utf8'), new RegExp(queued.token ?? ''));
+    assert.equal(readFileSync(messages, 'utf8').trim().split('\n').length, 1);
+    const store = new Store(state);
+    try {
+      const current = store.list()[0];
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.token, queued.token);
+      assert.equal(current?.delivery_status, 'sent');
+      assert.equal(store.claim(queued.id, queued.token ?? '').state, 'claimed');
+    } finally { store.close(); }
   });
 });
 

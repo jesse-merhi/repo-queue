@@ -7,8 +7,9 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { wakeMessage } from '../src/dispatcher.ts';
+import { codexClaimGraceMs } from '../src/claim-watch.ts';
 import { DeliveryLedger } from '../src/delivery-ledger.ts';
+import { wakeMessage } from '../src/dispatcher.ts';
 import { Store } from '../src/store.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -101,6 +102,63 @@ test('CLI accepts the current root Codex task and rejects another task identity'
     const currentTask = run([...base, '--task', rootTask], environment);
     assert.equal(currentTask.status, 0, currentTask.stderr);
     assert.equal(object(currentTask.stdout).task, rootTask);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('status flags native Codex acceptance without a claim and clears after a late claim', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'repoq-codex-unclaimed-'));
+  try {
+    const state = join(directory, 'state');
+    const store = new Store(state);
+    const added = store.add({
+      url: 'https://github.com/example/project/pull/942',
+      agent: 'codex', task: randomUUID(), cwd: directory,
+    });
+    const reserved = store.reserve()[0];
+    assert.ok(reserved?.token);
+    assert.equal(store.beginDelivery(reserved.id, reserved.token), true);
+    assert.equal(store.delivery(reserved.id, reserved.token, true), true);
+    const claude = store.add({
+      url: 'https://github.com/example/claude/pull/1',
+      agent: 'claude', task: randomUUID(), cwd: directory,
+    });
+    store.add({
+      url: 'https://github.com/example/pending/pull/1',
+      agent: 'codex', task: randomUUID(), cwd: directory,
+    });
+    const extra = store.reserve();
+    const claudeReservation = extra.find((entry) => entry.id === claude.id);
+    assert.ok(claudeReservation?.token);
+    assert.equal(store.beginDelivery(claude.id, claudeReservation.token), true);
+    assert.equal(store.delivery(claude.id, claudeReservation.token, true), true);
+    const database = new DatabaseSync(store.databasePath);
+    const acceptedAt = new Date(Date.now() - codexClaimGraceMs - 1_000).toISOString();
+    try {
+      const recent = run(['--state', state, 'status']);
+      assert.equal(recent.status, 0, recent.stderr);
+      assert.deepEqual(object(recent.stdout).delivery_alerts, []);
+      database.prepare('UPDATE entries SET updated_at = ?').run(acceptedAt);
+    } finally { database.close(); }
+
+    const overdue = run(['--state', state, 'status']);
+    assert.equal(overdue.status, 0, overdue.stderr);
+    const result = object(overdue.stdout);
+    const alerts = result.delivery_alerts;
+    assert.ok(Array.isArray(alerts));
+    assert.equal(alerts.length, 1);
+    assert.deepEqual({ ...alerts[0], message: undefined }, {
+      code: 'codex_claim_overdue', entry_id: added.id, task: added.task,
+      accepted_at: acceptedAt, message: undefined,
+    });
+    assert.match(alerts[0].message, /send one follow-up to that task/);
+    assert.doesNotMatch(alerts[0].message, new RegExp(reserved.token));
+    assert.equal((result.entries as Record<string, unknown>[])[0]?.delivery_status, 'sent');
+
+    const claimed = store.claim(added.id, reserved.token);
+    assert.equal(claimed.state, 'claimed');
+    const afterClaim = run(['--state', state, 'status']);
+    assert.equal(afterClaim.status, 0, afterClaim.stderr);
+    assert.deepEqual(object(afterClaim.stdout).delivery_alerts, []);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

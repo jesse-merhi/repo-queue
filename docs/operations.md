@@ -6,6 +6,8 @@
 
 A successful notification means the adapter accepted a queued message, completed a resume command, or received a successful native Claude `SendMessage` result. The owner must still claim its turn. Codex may accept a message while the desktop is unavailable; Claude may hold or refuse a message under its inbound settings. Native send success does not distinguish those outcomes. The reservation remains held until the owner acts or it is explicitly recovered.
 
+For a Codex reservation still unclaimed five minutes after native acceptance, `status` includes a `codex_claim_overdue` item in `delivery_alerts`; the dispatcher also writes one warning per accepted wake to its private log during that run. Five minutes is an attention threshold, not a Codex delivery guarantee. This is a claim gap, not proof that the wake was lost. Inspect the exact original task through the Codex app. If it is `notLoaded`, send one follow-up to that same task and confirm that it claims the existing entry. Do not launch a second owner, rotate its token, or repeat native sends while an earlier wake may still run. The alert disappears as soon as the original task claims, blocks, or completes. RepoQ cannot send an app notification from its standalone dispatcher; check `status` or the private dispatcher log when a turn seems stuck.
+
 ## Recover a failed notification
 
 If the original conversation already claimed its turn and lost its checkpoint after compaction, verify that existing claim instead of claiming again:

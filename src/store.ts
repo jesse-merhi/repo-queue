@@ -736,6 +736,20 @@ export class Store {
     `).all().map((row) => parseStoredEntry(row));
   }
 
+  acceptedCodexWakes(): Entry[] {
+    return this.database.prepare(`
+      SELECT entries.*, owner_configs.config_root AS owner_config_root,
+        owner_configs.env_explicit AS owner_config_explicit,
+        entry_checkpoints.path AS checkpoint_path
+      FROM entries
+      LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
+      LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+      WHERE entries.agent = 'codex' AND entries.state = 'reserved'
+        AND entries.delivery_status = 'sent'
+      ORDER BY entries.sequence
+    `).all().map((row) => parseStoredEntry(row));
+  }
+
   markUncertain(): number {
     return this.write(() => {
       const result = this.database.prepare(`

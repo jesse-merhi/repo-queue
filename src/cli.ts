@@ -3,9 +3,10 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
-import { Store } from './store.ts';
+import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { running, serve, start, stop } from './dispatcher.ts';
+import { Store } from './store.ts';
 import type { Agent } from './types.ts';
 
 const help = `RepoQ — local pull request turns for coding agents
@@ -13,7 +14,7 @@ const help = `RepoQ — local pull request turns for coding agents
 Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
 
   add URL --agent codex|claude --task UUID [--cwd DIRECTORY] [--checkpoint FILE]
-  status                         Show dispatcher and durable queue state
+  status                         Show queue state and overdue Codex claim alerts
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
   serve                          Run dispatcher in the foreground
@@ -114,9 +115,11 @@ export async function main(args: string[]): Promise<void> {
         if (command === 'status') {
           const ledger = new DeliveryLedger(state);
           try {
+            const entries = store.list();
             result = {
               dispatcher_running: await running(state),
-              entries: store.list(),
+              entries,
+              delivery_alerts: overdueCodexClaims(entries),
               delivery_attempts: ledger.list(),
             };
           } finally { ledger.close(); }
