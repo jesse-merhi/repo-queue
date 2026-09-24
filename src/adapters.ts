@@ -20,7 +20,8 @@ export interface DeliveryProcessLifecycle {
   spawned(pid: number): void;
 }
 
-function unrefHandle(handle: object): void {
+function unrefHandle(handle: object | null): void {
+  if (handle === null) return;
   const unref = Reflect.get(handle, 'unref');
   if (typeof unref === 'function') unref.call(handle);
 }
@@ -53,6 +54,10 @@ async function run(
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    let processError: Error | undefined;
+    child.once('error', (error) => {
+      processError = error;
+    });
     const release = (): void => {
       child.unref();
       unrefHandle(child.stdout);
@@ -66,7 +71,6 @@ async function run(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let overflow = false;
-    let processError: Error | undefined;
 
     const append = (destination: Buffer[], chunk: Buffer, currentBytes: number): number => {
       const remaining = maximumOutputBytes - currentBytes;
@@ -77,11 +81,8 @@ async function run(
       }
       return currentBytes + chunk.byteLength;
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
-    child.stderr.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
-    child.once('error', (error) => {
-      processError ??= error;
-    });
+    child.stdout?.on('data', (chunk: Buffer) => { stdoutBytes = append(stdout, chunk, stdoutBytes); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderrBytes = append(stderr, chunk, stderrBytes); });
     child.once('close', (code, signal) => {
       options.releaseSignal?.removeEventListener('abort', release);
       const result = {
@@ -101,8 +102,7 @@ async function run(
 
     const childPid = child.pid;
     if (childPid === undefined) {
-      processError = new Error(`${options.label} did not report a child process ID`);
-      child.kill('SIGKILL');
+      processError ??= new Error(`${options.label} did not report a child process ID`);
     } else {
       try {
         options.lifecycle?.spawned(childPid);

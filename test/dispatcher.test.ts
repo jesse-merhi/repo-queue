@@ -3,8 +3,10 @@ import { execFile, spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -170,6 +172,33 @@ test('an immediate CLI restart replaces the stopped dispatcher and delivers late
 
     await until(() => readFileSync(messages, 'utf8').includes(queued.id), 'delivery after immediate restart');
     assert.equal(await running(state), true);
+  });
+});
+
+test('a removed owner directory fails delivery without crashing or orphaning its slot', async () => {
+  await fixture(async (root, state, environment) => {
+    executable(root, 'codex', `process.exit(0);`);
+    const owner = join(root, 'owner');
+    mkdirSync(owner);
+    const queued = add(state, owner, 946, '10000000-0000-4000-8000-000000000946');
+    rmdirSync(owner);
+
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try { return store.list().find((entry) => entry.id === queued.id)?.delivery_status === 'failed'; }
+      finally { store.close(); }
+    }, 'failed delivery after owner directory removal');
+    assert.equal(await running(state), true);
+    const status = await command(state, ['status'], environment) as { delivery_attempts: unknown[] };
+    assert.deepEqual(status.delivery_attempts, []);
+    const store = new Store(state);
+    try {
+      const current = store.list().find((entry) => entry.id === queued.id);
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.token, queued.token);
+      assert.match(current?.delivery_error ?? '', /ENOENT/);
+    } finally { store.close(); }
   });
 });
 

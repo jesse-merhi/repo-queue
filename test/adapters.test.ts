@@ -107,6 +107,21 @@ test('Codex receives the exact task and the wake message as one argument', async
   });
 });
 
+test('a removed owner directory rejects delivery before registering a child', async () => {
+  await fixture(async (directory) => {
+    executable(directory, 'codex', `process.exit(0);`);
+    const lifecycle: string[] = [];
+    await assert.rejects(
+      deliver({ ...entry('codex'), cwd: join(directory, 'removed-owner') }, 'wake', undefined, {
+        beforeSpawn: () => { lifecycle.push('before'); },
+        spawned: () => { lifecycle.push('spawned'); },
+      }),
+      /ENOENT/,
+    );
+    assert.deepEqual(lifecycle, ['before']);
+  });
+});
+
 test('macOS activation loads only the exact task through the desktop URL', async () => {
   await fixture(async (directory) => {
     const capture = join(directory, 'activation.json');

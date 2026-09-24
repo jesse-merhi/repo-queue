@@ -21,6 +21,8 @@ Use the actual current conversation identity (`--agent claude` for Claude). The 
 
 Resolve authentication, missing executables, moved directories or incompatible native Claude messaging, then use `retry ID --token=TOKEN`. For a live Claude session, inspect its inbound-message notices: it may hold or refuse messages from the sender's normal configured permission mode. Do not change global settings, terminate the session or repeatedly retry to force delivery. Retry applies only before claim and replaces the token. A delayed old notification must fail its claim.
 
+If an owner's saved working directory was removed, delivery fails with `ENOENT` and retains the reservation. Restore that exact directory only when its original work has already been accounted for; registration cannot retarget an existing entry to another directory. Confirm the owner and any remote work are quiescent before retrying.
+
 When the owner has already claimed or blocked, use `recover ID --token=TOKEN --quiescent` only after establishing that the prior owner and its remote work have stopped. Recovery preserves the repository's place in line, replaces the token and allows a new notification. There is no automatic lease expiry or silent takeover.
 
 If an agent is waiting for a human approval, it should `block` with a reason and end its turn. The queue does not grant approval or decide that the work is finished.
