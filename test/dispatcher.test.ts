@@ -261,6 +261,46 @@ test('failed desktop activation retains accepted delivery and alerts without ret
   });
 });
 
+test('a different dispatcher HOME can read and deliver a shared desktop and Claude queue', async () => {
+  await fixture(async (root, state, environment) => {
+    const desktopTask = '10000000-0000-4000-8000-000000000944';
+    const claudeTask = '10000000-0000-4000-8000-000000000945';
+    const messages = join(root, 'messages');
+    const opened = join(root, 'opened');
+    executable(root, 'codex', `
+      require('node:fs').appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'desktop queued\\n');
+    `);
+    executable(root, 'claude', `
+      const fs = require('node:fs');
+      if (process.argv[2] === 'agents') process.stdout.write('[]');
+      else {
+        fs.appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'claude resumed\\n');
+        process.stdout.write(JSON.stringify({ type: 'result', session_id: '${claudeTask}', is_error: false }));
+      }
+    `);
+    executable(root, 'open', `require('node:fs').writeFileSync(process.env.REPOQ_FIXTURE + '/opened', 'wrong desktop');`);
+    const desktop = add(state, root, 944, desktopTask, 'codex', join(homedir(), '.codex'), true);
+    const claude = add(state, root, 945, claudeTask, 'claude');
+    environment.HOME = join(root, 'reader-home');
+    const before = await command(state, ['status'], environment);
+    assert.equal((before as { entries: Entry[] }).entries.length, 2);
+    await command(state, ['start'], environment);
+    await until(() => {
+      const store = new Store(state);
+      try {
+        const entries = store.list();
+        return entries.find((entry) => entry.id === desktop.id)?.delivery_status === 'sent' &&
+          entries.find((entry) => entry.id === claude.id)?.delivery_status === 'sent';
+      } finally { store.close(); }
+    }, 'both native deliveries');
+    assert.equal(existsSync(opened), false);
+    assert.deepEqual(readFileSync(messages, 'utf8').trim().split('\n').sort(),
+      ['claude resumed', 'desktop queued']);
+    const after = await command(state, ['status'], environment);
+    assert.equal((after as { entries: Entry[] }).entries.length, 2);
+  });
+});
+
 test('a shared status reader is not mistaken for the dispatcher and does not defeat startup', async () => {
   await fixture(async (root, state, environment) => {
     const messages = join(root, 'messages');

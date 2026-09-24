@@ -198,8 +198,8 @@ function parseStoredEntry(value: unknown): Entry {
   if (desktopValue !== null && desktopValue !== undefined && desktopValue !== 0 && desktopValue !== 1) {
     throw new InvalidStoredEntryError("stored queue entry has invalid desktop metadata");
   }
-  if (desktopValue === 1 && (agent !== "codex" || ownerConfigValue !== defaultConfigRoot("codex"))) {
-    throw new InvalidStoredEntryError("stored desktop owner is not a default-home Codex task");
+  if (desktopValue === 1 && (agent !== "codex" || ownerConfigValue === null || ownerConfigValue === undefined)) {
+    throw new InvalidStoredEntryError("stored desktop owner lacks Codex configuration metadata");
   }
   if (!isAbsolute(cwd)) {
     throw new InvalidStoredEntryError("stored queue entry has a non-absolute cwd");

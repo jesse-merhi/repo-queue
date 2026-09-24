@@ -115,7 +115,9 @@ test('macOS activation loads only the exact task through the desktop URL', async
       require('node:fs').writeFileSync(process.env.REPOQ_CAPTURE, JSON.stringify(process.argv.slice(2)));
     `);
     try {
-      await activateCodexTask({ ...entry('codex'), desktop: true }, undefined, undefined, 'darwin');
+      await activateCodexTask({
+        ...entry('codex'), desktop: true, owner_config_root: join(homedir(), '.codex'),
+      }, undefined, undefined, 'darwin');
       assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), ['-g', `codex://threads/${task}`]);
     } finally {
       delete process.env.REPOQ_CAPTURE;
@@ -126,8 +128,13 @@ test('macOS activation loads only the exact task through the desktop URL', async
 test('Linux and Claude do not request desktop activation', async () => {
   await fixture(async (directory) => {
     executable(directory, 'open', `process.exit(1);`);
-    await activateCodexTask({ ...entry('codex'), desktop: true }, undefined, undefined, 'linux');
+    await activateCodexTask({
+      ...entry('codex'), desktop: true, owner_config_root: join(homedir(), '.codex'),
+    }, undefined, undefined, 'linux');
     await activateCodexTask(entry('codex'), undefined, undefined, 'darwin');
+    await activateCodexTask({
+      ...entry('codex'), desktop: true, owner_config_root: join(directory, 'other-home', '.codex'),
+    }, undefined, undefined, 'darwin');
     await activateCodexTask(entry('claude'), undefined, undefined, 'darwin');
   });
 });

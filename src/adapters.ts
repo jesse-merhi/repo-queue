@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   claudeSenderPrompt,
   resolveClaudeLiveAddress,
@@ -241,7 +242,10 @@ export async function activateCodexTask(
   lifecycle?: DeliveryProcessLifecycle,
   platform = process.platform,
 ): Promise<void> {
-  if (entry.agent !== 'codex' || entry.desktop !== true || platform !== 'darwin') return;
+  if (
+    entry.agent !== 'codex' || entry.desktop !== true || platform !== 'darwin' ||
+    entry.owner_config_root !== join(homedir(), '.codex')
+  ) return;
   try {
     await run('open', ['-g', `codex://threads/${entry.task}`], {
       timeoutMs: 10_000,
