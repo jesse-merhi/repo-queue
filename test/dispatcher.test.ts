@@ -9,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { delimiter, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -213,7 +213,9 @@ test('dispatcher reports one overdue Codex claim without resending or changing o
   });
 });
 
-test('failed desktop activation retains accepted delivery and alerts without retrying the wake', async () => {
+test('failed desktop activation retains accepted delivery and alerts without retrying the wake', {
+  skip: process.platform !== 'darwin',
+}, async () => {
   await fixture(async (root, state, environment) => {
     const messages = join(root, 'messages');
     const activation = join(root, 'activation.json');
@@ -232,7 +234,8 @@ test('failed desktop activation retains accepted delivery and alerts without ret
       process.stderr.write('desktop unavailable');
       process.exit(1);
     `);
-    const queued = add(state, root, 943, '10000000-0000-4000-8000-000000000943', 'codex', undefined, true);
+    const queued = add(state, root, 943, '10000000-0000-4000-8000-000000000943',
+      'codex', join(homedir(), '.codex'), true);
     await command(state, ['start'], environment);
     await until(() => existsSync(activation), 'desktop activation request');
     await until(async () => {

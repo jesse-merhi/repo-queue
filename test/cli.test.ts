@@ -89,7 +89,7 @@ test('CLI accepts the current root Codex task and rejects another task identity'
   try {
     const state = join(directory, 'state');
     const rootTask = randomUUID();
-    const environment = { CODEX_THREAD_ID: rootTask, CODEX_SESSION_ID: rootTask };
+    const environment = { CODEX_THREAD_ID: rootTask, CODEX_SESSION_ID: rootTask, CODEX_HOME: '' };
     const base = [
       '--state', state, 'add', 'https://github.com/example/project/pull/10',
       '--agent', 'codex', '--cwd', directory,
