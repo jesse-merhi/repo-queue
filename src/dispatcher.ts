@@ -14,7 +14,7 @@ import {
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { deliver } from './adapters.ts';
+import { activateCodexTask, deliver } from './adapters.ts';
 import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger, type DeliveryAttempt } from './delivery-ledger.ts';
 import { Store } from './store.ts';
@@ -228,11 +228,17 @@ async function sendEntry(
   const store = new Store(state);
   try {
     try {
-      await deliver(entry, wakeMessage(entry, state), releaseSignal, {
+      const lifecycle = {
         beforeSpawn: () => { ledger.beforeSpawn(attempt); },
-        spawned: (pid) => { ledger.spawned(attempt, pid); },
-      });
+        spawned: (pid: number) => { ledger.spawned(attempt, pid); },
+      };
+      await deliver(entry, wakeMessage(entry, state), releaseSignal, lifecycle);
       store.delivery(entry.id, entry.token ?? '', true, '');
+      try {
+        await activateCodexTask(entry, releaseSignal, lifecycle);
+      } catch (error) {
+        store.activationError(entry.id, entry.token ?? '', safeError(error, entry.token));
+      }
     } catch (error) {
       store.delivery(entry.id, entry.token ?? '', false, safeError(error, entry.token));
     }

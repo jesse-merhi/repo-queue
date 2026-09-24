@@ -13,7 +13,7 @@ const help = `RepoQ — local pull request turns for coding agents
 
 Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
 
-  add URL --agent codex|claude --task UUID [--cwd DIRECTORY] [--checkpoint FILE]
+  add URL --agent codex|claude --task UUID [--cwd DIRECTORY] [--checkpoint FILE] [--desktop]
   status                         Show queue state and overdue Codex claim alerts
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
@@ -40,9 +40,10 @@ const options = {
   cwd: { type: 'string' }, token: { type: 'string' }, reason: { type: 'string' },
   quiescent: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' }, checkpoint: { type: 'string' },
+  desktop: { type: 'boolean' },
 } as const;
 const allowed: Record<string, readonly string[]> = {
-  add: ['agent', 'task', 'cwd', 'checkpoint'], status: [], start: [], stop: [], serve: [],
+  add: ['agent', 'task', 'cwd', 'checkpoint', 'desktop'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
   retry: ['token'], recover: ['token', 'quiescent'],
@@ -134,6 +135,7 @@ export async function main(args: string[]): Promise<void> {
           if (!statSync(cwd).isDirectory()) throw new Error('--cwd must be a directory');
           result = store.add({
             url: required(positionals[1], 'PR URL'), agent: owner, task, cwd,
+            ...(values.desktop ? { desktop: true } : {}),
             ...(values.checkpoint === undefined ? {} : { checkpoint_path: resolve(cwd, required(values.checkpoint, '--checkpoint')) }),
           });
           break;

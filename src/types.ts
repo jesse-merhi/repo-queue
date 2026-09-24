@@ -34,6 +34,7 @@ export interface Entry {
   cwd: string;
   owner_config_root?: string;
   owner_config_explicit?: boolean;
+  desktop?: boolean;
   checkpoint_path?: string;
   state: QueueState;
   token: string | null;
@@ -50,5 +51,6 @@ export interface AddEntryInput {
   task: string;
   cwd: string;
   owner_config_root?: string;
+  desktop?: boolean;
   checkpoint_path?: string;
 }

@@ -99,9 +99,16 @@ test('CLI accepts the current root Codex task and rejects another task identity'
     assert.equal(otherTask.status, 1);
     assert.match(otherTask.stderr, /--task must match the current Codex task/);
 
-    const currentTask = run([...base, '--task', rootTask], environment);
+    const currentTask = run([...base, '--task', rootTask, '--desktop'], environment);
     assert.equal(currentTask.status, 0, currentTask.stderr);
     assert.equal(object(currentTask.stdout).task, rootTask);
+    assert.equal(object(currentTask.stdout).desktop, true);
+    const customHome = run([
+      '--state', state, 'add', 'https://github.com/example/project/pull/11',
+      '--agent', 'codex', '--task', rootTask, '--cwd', directory, '--desktop',
+    ], { ...environment, CODEX_HOME: join(directory, 'custom-home') });
+    assert.equal(customHome.status, 1);
+    assert.match(customHome.stderr, /default CODEX_HOME/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

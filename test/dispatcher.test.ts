@@ -54,6 +54,7 @@ function add(
   task: string,
   agent: Agent = 'codex',
   ownerConfigRoot?: string,
+  desktop = false,
 ): Entry {
   const store = new Store(state);
   try {
@@ -63,6 +64,7 @@ function add(
       task,
       cwd: root,
       ...(ownerConfigRoot === undefined ? {} : { owner_config_root: ownerConfigRoot }),
+      ...(desktop ? { desktop: true } : {}),
     });
   } finally {
     store.close();
@@ -77,6 +79,7 @@ async function fixture(run: (root: string, state: string, environment: NodeJS.Pr
     PATH: `${root}${delimiter}${process.env.PATH ?? ''}`,
     REPOQ_FIXTURE: root,
   };
+  executable(root, 'open', '');
   try {
     await run(root, state, environment);
   } finally {
@@ -207,6 +210,51 @@ test('dispatcher reports one overdue Codex claim without resending or changing o
       assert.equal(current?.delivery_status, 'sent');
       assert.equal(store.claim(queued.id, queued.token ?? '').state, 'claimed');
     } finally { store.close(); }
+  });
+});
+
+test('failed desktop activation retains accepted delivery and alerts without retrying the wake', async () => {
+  await fixture(async (root, state, environment) => {
+    const messages = join(root, 'messages');
+    const activation = join(root, 'activation.json');
+    executable(root, 'codex', `
+      require('node:fs').appendFileSync(process.env.REPOQ_FIXTURE + '/messages', 'queued\\n');
+    `);
+    executable(root, 'open', `
+      const fs = require('node:fs');
+      const { DatabaseSync } = require('node:sqlite');
+      const database = new DatabaseSync(process.env.REPOQ_FIXTURE + '/state/queue.sqlite3');
+      const row = database.prepare('SELECT delivery_status FROM entries').get();
+      fs.writeFileSync(process.env.REPOQ_FIXTURE + '/activation.json', JSON.stringify({
+        args: process.argv.slice(2), status: row.delivery_status,
+      }));
+      database.close();
+      process.stderr.write('desktop unavailable');
+      process.exit(1);
+    `);
+    const queued = add(state, root, 943, '10000000-0000-4000-8000-000000000943', 'codex', undefined, true);
+    await command(state, ['start'], environment);
+    await until(() => existsSync(activation), 'desktop activation request');
+    await until(async () => {
+      const status = await command(state, ['status'], environment);
+      return JSON.stringify(status).includes('codex_activation_request_failed');
+    }, 'activation failure alert');
+    assert.deepEqual(JSON.parse(readFileSync(activation, 'utf8')), {
+      args: ['-g', `codex://threads/${queued.task}`], status: 'sent',
+    });
+    const store = new Store(state);
+    try {
+      const current = store.list()[0];
+      assert.equal(current?.state, 'reserved');
+      assert.equal(current?.delivery_status, 'sent');
+      assert.equal(current?.token, queued.token);
+      assert.match(current?.delivery_error ?? '', /desktop unavailable/);
+      assert.equal(store.claim(queued.id, queued.token ?? '').state, 'claimed');
+      const status = await command(state, ['status'], environment);
+      assert.deepEqual((status as { delivery_alerts: unknown }).delivery_alerts, []);
+    } finally { store.close(); }
+    await delay(1_200);
+    assert.equal(readFileSync(messages, 'utf8').trim().split('\n').length, 1);
   });
 });
 

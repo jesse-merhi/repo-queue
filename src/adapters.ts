@@ -233,3 +233,23 @@ export async function deliver(
     throw redact(error, entry.token);
   }
 }
+
+/** Load the exact desktop task so it can consume the message already accepted by `codex queue`. */
+export async function activateCodexTask(
+  entry: Entry,
+  releaseSignal?: AbortSignal,
+  lifecycle?: DeliveryProcessLifecycle,
+  platform = process.platform,
+): Promise<void> {
+  if (entry.agent !== 'codex' || entry.desktop !== true || platform !== 'darwin') return;
+  try {
+    await run('open', ['-g', `codex://threads/${entry.task}`], {
+      timeoutMs: 10_000,
+      ...(releaseSignal === undefined ? {} : { releaseSignal }),
+      ...(lifecycle === undefined ? {} : { lifecycle }),
+      label: 'Codex desktop activation request',
+    });
+  } catch (error) {
+    throw redact(error, entry.token);
+  }
+}

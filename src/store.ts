@@ -138,6 +138,7 @@ function parseStoredEntry(value: unknown): Entry {
   const cwd = storedString(row, "cwd", MAX_PATH_LENGTH);
   const ownerConfigValue = row.owner_config_root;
   const ownerConfigExplicitValue = row.owner_config_explicit;
+  const desktopValue = row.desktop;
   const checkpointValue = row.checkpoint_path;
   const state = storedString(row, "state", 16);
   const storedToken = row.token;
@@ -193,6 +194,12 @@ function parseStoredEntry(value: unknown): Entry {
     throw new InvalidStoredEntryError(
       "stored queue entry has owner configuration environment metadata without a root",
     );
+  }
+  if (desktopValue !== null && desktopValue !== undefined && desktopValue !== 0 && desktopValue !== 1) {
+    throw new InvalidStoredEntryError("stored queue entry has invalid desktop metadata");
+  }
+  if (desktopValue === 1 && (agent !== "codex" || ownerConfigValue !== defaultConfigRoot("codex"))) {
+    throw new InvalidStoredEntryError("stored desktop owner is not a default-home Codex task");
   }
   if (!isAbsolute(cwd)) {
     throw new InvalidStoredEntryError("stored queue entry has a non-absolute cwd");
@@ -251,6 +258,7 @@ function parseStoredEntry(value: unknown): Entry {
     ...(ownerConfigExplicitValue === 0 || ownerConfigExplicitValue === 1
       ? { owner_config_explicit: ownerConfigExplicitValue === 1 }
       : {}),
+    ...(desktopValue === 0 || desktopValue === 1 ? { desktop: desktopValue === 1 } : {}),
     ...(typeof checkpointValue === "string" ? { checkpoint_path: checkpointValue } : {}),
     state,
     token: storedToken,
@@ -464,6 +472,12 @@ export class Store {
       throw new TypeError("cwd must be a directory");
     }
     const config = ownerConfig(input, realpathSync(cwd));
+    if (input.desktop !== undefined && typeof input.desktop !== "boolean") {
+      throw new TypeError("desktop must be a boolean");
+    }
+    if (input.desktop && (input.agent !== "codex" || config.root !== defaultConfigRoot("codex"))) {
+      throw new TypeError("--desktop requires a Codex owner using the default CODEX_HOME");
+    }
     let checkpointPath: string | undefined;
     if (input.checkpoint_path !== undefined) {
       const path = boundedString(input.checkpoint_path, "checkpoint path", MAX_PATH_LENGTH);
@@ -479,6 +493,7 @@ export class Store {
         .prepare(`
           SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
+          owner_configs.desktop AS desktop,
           entry_checkpoints.path AS checkpoint_path
           FROM entries
           LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -493,6 +508,7 @@ export class Store {
           entry.task === task &&
           entry.cwd === cwd &&
           (entry.owner_config_root === undefined || entry.owner_config_root === config.root) &&
+          (entry.desktop ?? false) === (input.desktop ?? false) &&
           (entry.owner_config_explicit === undefined ||
             entry.owner_config_explicit === config.explicit)
         ) {
@@ -528,11 +544,12 @@ export class Store {
         timestamp,
       );
       this.database.prepare(`
-        INSERT INTO owner_configs (entry_id, config_root, env_explicit) VALUES (?, ?, ?)
+        INSERT INTO owner_configs (entry_id, config_root, env_explicit, desktop) VALUES (?, ?, ?, ?)
       `).run(
         id,
         config.root,
         config.explicit === undefined ? null : config.explicit ? 1 : 0,
+        input.desktop ? 1 : 0,
       );
       if (checkpointPath !== undefined) {
         this.database.prepare("INSERT INTO entry_checkpoints (entry_id, path) VALUES (?, ?)").run(id, checkpointPath);
@@ -546,6 +563,7 @@ export class Store {
       .prepare(`
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
+          owner_configs.desktop AS desktop,
           entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -727,7 +745,8 @@ export class Store {
     return this.database.prepare(`
       SELECT entries.*, owner_configs.config_root AS owner_config_root,
         owner_configs.env_explicit AS owner_config_explicit,
-          entry_checkpoints.path AS checkpoint_path
+        owner_configs.desktop AS desktop,
+        entry_checkpoints.path AS checkpoint_path
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
       LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
@@ -740,6 +759,7 @@ export class Store {
     return this.database.prepare(`
       SELECT entries.*, owner_configs.config_root AS owner_config_root,
         owner_configs.env_explicit AS owner_config_explicit,
+        owner_configs.desktop AS desktop,
         entry_checkpoints.path AS checkpoint_path
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
@@ -803,6 +823,21 @@ export class Store {
     });
   }
 
+  activationError(id: string, suppliedToken: string, error: string): boolean {
+    const deliveryError = boundedString(error, "activation error", MAX_MESSAGE_LENGTH, true);
+    return this.write(() => {
+      const entry = this.callbackEntry(id, suppliedToken);
+      if (entry === undefined || entry.state !== "reserved" || entry.delivery_status !== "sent") {
+        return false;
+      }
+      const result = this.database.prepare(`
+        UPDATE entries SET delivery_error = ?
+        WHERE id = ? AND state = 'reserved' AND delivery_status = 'sent'
+      `).run(deliveryError, id);
+      return changes(result.changes) === 1;
+    });
+  }
+
   private initialize(): void {
     this.write(() => {
       const versionRow = this.database.prepare("PRAGMA user_version").get();
@@ -855,7 +890,8 @@ export class Store {
           config_root TEXT NOT NULL,
           env_explicit INTEGER CHECK (
             env_explicit IN (0, 1) OR env_explicit IS NULL
-          )
+          ),
+          desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
         );
       `);
       if (versionValue === 1) {
@@ -863,6 +899,13 @@ export class Store {
           ALTER TABLE owner_configs ADD COLUMN env_explicit INTEGER CHECK (
             env_explicit IN (0, 1) OR env_explicit IS NULL
           )
+        `);
+      }
+      const hasDesktop = this.database.prepare("PRAGMA table_info(owner_configs)").all()
+        .some((column) => column.name === "desktop");
+      if (!hasDesktop) {
+        this.database.exec(`
+          ALTER TABLE owner_configs ADD COLUMN desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
         `);
       }
       if (versionValue < SCHEMA_VERSION) {
@@ -891,6 +934,7 @@ export class Store {
       .prepare(`
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
+          owner_configs.desktop AS desktop,
           entry_checkpoints.path AS checkpoint_path
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
