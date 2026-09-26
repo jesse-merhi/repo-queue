@@ -22,13 +22,13 @@ Copy the complete `skills/repo-queue` directory to the appropriate directory, pr
 - Codex: `~/.codex/skills/repo-queue`
 - Claude Code: `~/.claude/skills/repo-queue`
 
-Inspect an existing destination before changing it. Preserve local modifications or another owner's skill. The source has complete variants for GPT-5.6, GPT-6 Astra, Claude Fable 5.1 and Claude Opus 5. Select the matching `variants/*.md` file as the installed `SKILL.md`; do not change your model. `BASE.md` is the shared source for maintainers.
+Inspect an existing destination before changing it. Preserve local modifications or another owner's skill, including stronger explicit-user queue authority; reconcile those changes into the chosen profile before replacing the installed entrypoint. The source has complete variants for GPT-5.6, GPT-6 Astra, Claude Fable 5.1 and Claude Opus 5. Select the matching `variants/*.md` file as the installed `SKILL.md`; do not change your model. `BASE.md` is the shared source for maintainers.
 
 Materialize that selection by copying the chosen variant to the destination `SKILL.md`. If the destination `SKILL.md` is a verified RepoQ symlink, unlink it first so copying does not overwrite its target. npm tarballs omit the source symlink, so copying the extracted directory alone is not a complete skill installation.
 
 New sessions discover the skill. For consistent automatic use, add this to your own global agent instructions:
 
-> For authorized GitHub or Bitbucket Cloud PR merges, use the repo-queue skill before final update, validation and merge, even when I do not mention the queue. A request to implement or review alone does not authorize a merge or require a turn.
+> For authorized GitHub or Bitbucket Cloud PR merges, use the repo-queue skill even when I do not mention the queue. Finish native pre-submission gates before submitting; acquire a legacy local turn before final update, validation and merge. A request to implement or review alone does not authorize a merge or require a turn.
 
 Do not replace your existing global instructions with this paragraph. Already-running conversations may retain older instructions. Local Claude Code sessions can remain open. RepoQ uses a short-lived native sender restricted to messaging tools, with the normal configured permission mode and no interactive permission prompts. This consumes an extra sender model turn; the receiving session's work also consumes usage. Exited sessions use the standalone resume adapter. Receiver inbound settings and per-session permission-mode overrides can hold or refuse a live wake; installation does not change them.
 
@@ -48,21 +48,19 @@ Register each PR from its original harness environment. New entries retain that 
 
 ## Upgrade for native queues
 
-Native support advances the queue database to schema 4. It adds native authorization and observation records without rewriting existing entries, ownership tokens, sequence, reservation states or owner configuration. All existing entries remain legacy, including waiting, reserved and claimed work. Duplicate `submit` cannot convert them. Let their original owners finish the legacy flow; do not cancel active owners to accelerate a cutover. New native work is independent of those local reservations.
+Native support advances the queue database to schema 4. It adds native authorization and observation records without rewriting existing entries, ownership tokens, sequence, reservation states or owner configuration. All existing entries remain legacy, including waiting, reserved and claimed work. Duplicate `submit` cannot convert them. Let their original owners finish the legacy flow; do not cancel active owners to accelerate a cutover. Unrelated native work is independent of those local reservations; overlapping PR scopes retain their existing owner.
 
 Before **any new CLI command opens live state**, pause registration, save a private status snapshot with the old executable, stop the old dispatcher, and verify it stopped. Confirm outstanding adapter processes and preserve their delivery ledger. Back up the stopped state directory, build and validate the new package, install its tarball and matching skill, then start once and compare IDs, tokens, order, states and owner metadata against the snapshot. `start` alone does not replace a running dispatcher. This upgrade does not grant authority to interrupt owners or remote jobs.
 
 Old commands reject schema 4 instead of processing native work as legacy turns. An already-running old process has already opened its database, so it **must** be stopped before upgrading. Do not run mixed versions. Rollback is not a database downgrade: restoring the pre-upgrade backup is safe only before any post-upgrade registrations, delivery, claims or provider submissions. Otherwise retain schema 4 and reconcile all post-upgrade work first; restoring a stale backup could duplicate a live queue request or lose an owner. Never delete native records or lower `user_version` to force an old binary to run.
 
-Native GitHub operation requires authenticated `gh` on the dispatcher PATH, access to effective branch rules, PR and GraphQL reads, and Contents write permission for the asynchronous merge API. The shipped adapter targets github.com, including Enterprise Cloud; Enterprise Server hosts are not supported. It never changes branch rules or CI configuration. Deploy required `merge_group` validation before enabling a repository’s native queue.
+Native GitHub operation requires authenticated `gh` on the dispatcher PATH, PR and GraphQL access to the actual target branch’s native queue, and Contents write permission for the asynchronous merge API. The shipped adapter targets github.com, including Enterprise Cloud; Enterprise Server hosts are not supported. It never changes branch rules or CI configuration. Deploy required `merge_group` validation before enabling a repository’s native queue.
 
-## Upgrade an existing Node dispatcher
-
-The desktop activation flag adds a default-off column to the existing database version, so older Node commands can still read the state. An already-running dispatcher keeps its old code and will not activate newly opted-in desktop entries. Stop it with the old command and verify `repo-queue status` reports `dispatcher_running: false`. Install the new package and matching skill, then start the new dispatcher and compare the entry IDs, tokens, order and states with the saved status. `repo-queue start` alone does not replace a running dispatcher. Previously accepted, unclaimed wakes are not reactivated during upgrade; inspect their exact original tasks before intervening. Do not rotate tokens or resend them solely because the dispatcher changed.
+Previously accepted, unclaimed desktop wakes are not reactivated by an upgrade. The saved desktop flag and original task remain unchanged; inspect that task before intervening. Do not rotate tokens or resend accepted messages solely because the dispatcher changed. If a wake still contains an old executable path, establish its delivery and owner state before reconciling it; do not run a schema-3 command against schema 4.
 
 ## Upgrade from the Python preview
 
-The TypeScript version reads the existing SQLite entries without changing IDs, order or tokens. Its dispatcher lock differs, so never run both dispatchers on one state directory.
+The current TypeScript version migrates existing SQLite state to schema 4 without changing IDs, order or tokens. The schema-4 compatibility and rollback boundaries above also apply here. Its dispatcher lock differs, so never run both dispatchers on one state directory.
 
 1. Ask participating agents to pause new registrations during the upgrade. Use the **old** command to save status, including every unfinished entry's ID and token. Let claimed work finish or explicitly resolve it; do not release reservations while work is still running. A delivered message may still be waiting in a conversation's inbox.
 2. Run the old `repo-queue stop`, then use the old `repo-queue status` to verify `dispatcher_running` is false. Stopping the dispatcher does not terminate agents it already launched.

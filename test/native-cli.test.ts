@@ -28,14 +28,22 @@ const args = process.argv.slice(2);
 fs.appendFileSync(root + '/calls', JSON.stringify(args) + '\\n');
 const phase = fs.readFileSync(root + '/phase', 'utf8');
 const head = '${sha}';
-const pull = (number) => ({number, html_url:'https://github.com/fixture/repo/pull/'+number, merged_at:phase==='merged'?'2026-09-26T01:00:00Z':null, head:{sha:head}, base:{ref:'main'}, stack:(phase==='stack'||phase==='merged')?{number:7,base:{ref:'main'}}:null});
+const stacked = ['stack','classic-stack','merged'].includes(phase);
+const target = phase==='classic-stack'?'release/Stable':'main';
+const pull = (number) => ({number, html_url:'https://github.com/fixture/repo/pull/'+number, merged_at:phase==='merged'?'2026-09-26T01:00:00Z':null, head:{sha:head}, base:{ref:stacked&&number===2?'feature/first':target}, stack:stacked?{number:7,base:{ref:target}}:null});
 let result;
-if (args.includes('graphql')) result={data:{repository:{pullRequest:{headRefOid:head,state:phase==='merged'?'MERGED':'OPEN',mergeQueueEntry:phase==='queued'?{state:'QUEUED'}:phase==='validating'?{state:'AWAITING_CHECKS'}:null}}}};
-else if(args.some(x=>x.includes('/rules/branches/'))) {
- if (phase==='rules-error') { process.stderr.write('gh: Forbidden (HTTP 403)'); process.exit(1); }
- result=phase==='legacy'?[[]]:[[{type:'merge_queue'}]];
+if (args.includes('graphql') && args.some(x=>x.includes('mergeQueue(branch:'))) {
+ if (phase==='queue-error') { process.stderr.write('gh: Forbidden (HTTP 403)'); process.exit(1); }
+ if (phase==='queue-malformed') result={data:{repository:{}}};
+ else if (phase==='queue-graphql-error') result={errors:[{message:'Cannot read target queue'}],data:{repository:{mergeQueue:null}}};
+ else result={data:{repository:{mergeQueue:phase==='legacy'||!args.includes('branch='+target)?null:{id:'fixture-queue'}}}};
 }
-else if(args.some(x=>x.includes('/stacks/'))) result={base:{ref:'main'},pull_requests:[pull(1),pull(2)]};
+else if (args.includes('graphql')) result={data:{repository:{pullRequest:{headRefOid:head,state:phase==='merged'?'MERGED':'OPEN',mergeQueueEntry:phase==='queued'?{state:'QUEUED'}:phase==='validating'?{state:'AWAITING_CHECKS'}:null}}}};
+else if(args.some(x=>x.includes('/rules/branches/'))) {
+ if (phase==='queue-error') { process.stderr.write('gh: Forbidden (HTTP 403)'); process.exit(1); }
+ result=['legacy','classic','classic-stack'].includes(phase)?[[]]:[[{type:'merge_queue'}]];
+}
+else if(args.some(x=>x.includes('/stacks/'))) result={base:{ref:target},pull_requests:[pull(1),pull(2)]};
 else if(args.includes('PUT') && phase==='existing') {
  process.stdout.write(JSON.stringify({status:'pending',details:{uuid:'fixture-request',expected_head_sha:head,merge_action:'default',merge_method:'default',message:'Already pending'}}));
  process.stderr.write('gh: Conflict (HTTP 409)'); process.exit(1);
@@ -145,10 +153,10 @@ test('detached dispatcher delivers a single ejection wake to the saved session, 
 });
 
 
-test('native submission requires explicit authority, fails closed on rule errors, and preserves legacy fallback', async () => {
+test('native submission requires explicit authority, fails closed on queue errors, and preserves legacy fallback', async () => {
   await fixture(async (root, store, command, phase) => {
     await assert.rejects(command(registration(root).filter((arg) => arg !== '--authorize-merge')), /requires --authorize-merge/);
-    phase('rules-error');
+    phase('queue-error');
     await assert.rejects(command(registration(root)), /GitHub API request failed/);
     assert.equal(store.list().length, 0);
     phase('legacy');
@@ -175,5 +183,51 @@ test('conflicting accepted request retains its UUID and quiescence never bypasse
     await command(['resume-native', entry.id, `--token=${entry.token}`, '--quiescent']);
     assert.equal(store.list()[0]?.state, 'waiting');
     assert.equal(store.list()[0]?.native?.request, null);
+  });
+});
+
+
+test('legacy registration cannot take over a claimed native prefix and unrelated legacy work remains eligible', async (t) => {
+  await fixture(async (root, store, command, phase) => {
+    phase('stack');
+    await command([...registration(root, 2), '--stack']);
+    const native = store.list()[0];
+    assert.ok(native?.native);
+    assert.ok(native.token);
+    store.updateNative(native.id, native.native, { ...native.native, state: 'failed' }, true);
+    store.claim(native.id, native.token);
+    const original = store.list()[0];
+    const legacy = ['--agent', 'claude', '--task', '00000000-0000-4000-8000-000000000010', '--cwd', root];
+    await assert.rejects(command(['add', 'https://github.com/fixture/repo/pull/1', ...legacy]), /overlaps an unfinished registration/);
+    assert.deepEqual(store.list(), [original]);
+    await command(['add', 'https://github.com/fixture/repo/pull/3', ...legacy]);
+    assert.deepEqual(store.reserve().map((entry) => entry.pr_number), [3]);
+    assert.deepEqual(store.list()[0], original);
+    t.diagnostic('CLI add for native-owned lower PR rejected; native owner unchanged; unrelated legacy #3 reserved');
+  });
+});
+
+test('classic protection selects native mode for the actual target, including a stack base', async (t) => {
+  for (const scenario of [{ phase: 'classic', pr: 1, base: 'main' }, { phase: 'classic-stack', pr: 2, base: 'release/Stable' }]) {
+    await fixture(async (root, store, command, phase) => {
+      phase(scenario.phase);
+      await command([...registration(root, scenario.pr), ...(scenario.pr === 2 ? ['--stack'] : [])]);
+      const entry = store.list()[0];
+      assert.ok(entry?.native);
+      assert.equal(entry.native.base, scenario.base);
+      assert.equal(entry.native.state, 'admission_pending');
+      assert.deepEqual(store.reserve(), []);
+      t.diagnostic(`CLI submit #${scenario.pr}: native queue detected on ${scenario.base} with no ruleset queue`);
+    });
+  }
+});
+
+test('missing or errored native queue capability cannot silently become a legacy turn', async () => {
+  await fixture(async (root, store, command, phase) => {
+    for (const value of ['queue-malformed', 'queue-graphql-error']) {
+      phase(value);
+      await assert.rejects(command(registration(root)), /GitHub/);
+      assert.deepEqual(store.list(), []);
+    }
   });
 });

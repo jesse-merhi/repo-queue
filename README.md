@@ -34,7 +34,7 @@ repo-queue submit https://github.com/example/project/pull/42 \
   --agent codex --task CONVERSATION_UUID --cwd /path/to/worktree --authorize-merge
 ```
 
-`submit` reads the effective rules for the PR’s target branch, or its native stack’s base. A required GitHub merge queue uses the stack-aware asynchronous merge API with `merge_action=merge_queue` and the saved head SHA. Add `--stack` only when all lower unmerged PRs through the selected PR are authorized. API errors fail safely; they do not select a local merge. GitHub bases without a queue and Bitbucket use the existing local turn flow.
+`submit` queries GitHub’s native queue for the PR’s target branch, or its native stack’s base, covering both classic branch protection and rulesets. A required GitHub merge queue uses the stack-aware asynchronous merge API with `merge_action=merge_queue` and the saved head SHA. Add `--stack` only when all lower unmerged PRs through the selected PR are authorized. API errors fail safely; they do not select a local merge. GitHub bases without a queue and Bitbucket use the existing local turn flow.
 
 Save the returned entry and end the agent turn. `status` exposes native authorization, scope, asynchronous request and provider state. Acceptance stays `admission_pending`; queue presence becomes `enqueued` or `validating`; removal or failure wakes the original owner. Repair with that wake’s claim/verify commands, then `resume-native ID --token=TOKEN`. It preserves authorization, records the repaired head and returns a new token. GitHub confirmation alone marks the entry `merged`/`done`. The runtime monitors every 30 seconds without model polling. Native repair work does not hold a repository-wide lock.
 

@@ -130,9 +130,11 @@ export const github: Github = {
       members = pulls.slice(0, index + 1).filter((member) => member.merged_at === null).map((member) => ({ number: number(member.number), head: sha(object(member.head).sha) }));
       if (members.at(-1)?.head !== head) throw new Error('GitHub stack head changed while reading');
     }
-    const rules = await api([`${endpoint}/rules/branches/${encodeURIComponent(base)}?per_page=100`, '--paginate', '--slurp', ...headers]);
-    if (!Array.isArray(rules) || !rules.every(Array.isArray)) throw new Error('Invalid effective GitHub rules');
-    const required = rules.flat().map((rule: unknown) => string(object(rule).type)).includes('merge_queue');
+    // The native branch queue covers classic protection as well as rulesets.
+    const capability = object(await api(['graphql', '-f', 'query=query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){id}}}', '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `branch=${base}`]));
+    const targetQueue = object(object(capability.data).repository).mergeQueue;
+    if (targetQueue !== null) string(object(targetQueue).id);
+    const required = targetQueue !== null;
     return { base, head, members, required, state: node.state, queue };
   },
   async submit(repo, pr, head) {

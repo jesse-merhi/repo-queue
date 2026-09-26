@@ -530,12 +530,11 @@ export class Store {
         );
       }
 
-      if (input.native !== undefined) {
-        const overlaps = this.list().some((entry) => entry.repo === parsed.repo && entry.state !== 'done' &&
-          (entry.native?.members ?? [{ number: entry.pr_number }]).some((member) =>
-            input.native?.members.some((candidate) => candidate.number === member.number)));
-        if (overlaps) throw new ConflictError('native scope overlaps an unfinished registration; preserve its original owner and finish or reconcile that work first');
-      }
+      const scope = input.native?.members ?? [{ number: parsed.prNumber }];
+      const overlaps = this.list().some((entry) => entry.repo === parsed.repo && entry.state !== 'done' &&
+        (entry.native?.members ?? [{ number: entry.pr_number }]).some((member) =>
+          scope.some((candidate) => candidate.number === member.number)));
+      if (overlaps) throw new ConflictError('PR scope overlaps an unfinished registration; preserve its original owner and finish or reconcile that work first');
       const timestamp = now();
       const id = randomUUID();
       this.database.prepare(`
