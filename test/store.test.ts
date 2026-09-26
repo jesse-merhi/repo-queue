@@ -297,7 +297,7 @@ describe("Store", () => {
           return value.name;
         });
       assert.deepEqual(columns, ["entry_id", "config_root", "env_explicit", "desktop"]);
-      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 4);
       database.close();
     } finally {
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -399,7 +399,7 @@ describe("Store", () => {
       assert.equal(restored?.owner_config_root, join(homedir(), ".claude"));
       assert.equal(restored?.owner_config_explicit, undefined);
       const database = new DatabaseSync(migrated.databasePath, { readOnly: true });
-      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
+      assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 4);
       assert.equal(
         database.prepare("SELECT env_explicit FROM owner_configs WHERE entry_id = ?")
           .get(entry.id)?.env_explicit,
@@ -980,7 +980,7 @@ describe("Store", () => {
     assert.equal(migrated.claim(reserved.id, ownerToken).cwd, "/work/legacy");
     assert.equal(migrated.done(reserved.id, ownerToken).state, "done");
     const version = new DatabaseSync(migrated.databasePath, { readOnly: true });
-    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 3);
+    assert.equal(version.prepare("PRAGMA user_version").get()?.user_version, 4);
     version.close();
     migrated.close();
   });
