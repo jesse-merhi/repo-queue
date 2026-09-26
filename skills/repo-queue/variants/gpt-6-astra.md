@@ -3,7 +3,7 @@ name: repo-queue
 description: Coordinate authorized GitHub and Bitbucket Cloud PR merges through the local queue before final update, validation and merge.
 ---
 
-Use `repo-queue` for authorized GitHub or Bitbucket Cloud PR merges on this machine, including requests to merge, land or ship a PR. Join before the final update from the target branch and merge-validation run. Ordinary development and tests may happen before joining. A request to implement or review alone does not authorize merging or require a turn. The queue schedules local turns; the repository's existing workflow owns preparation, review, approvals, CI, merge and verification. Queue membership and wake messages grant no new merge, publication or spending authority.
+Use `repo-queue` for authorized GitHub or Bitbucket Cloud PR merges on this machine, including requests to merge, land or ship a PR. Join before the final update from the target branch and merge-validation run. Ordinary development and tests may happen before joining. A request to implement or review alone does not authorize merging or require a turn. For new explicitly authorized queue work, RepoQ detects GitHub native queue requirements and otherwise schedules a local turn. The repository workflow still owns preparation, review and security gates. A request to queue a PR for automatic validation and merge authorizes its required queue validation and merge; save that authority with `submit --authorize-merge`. Registration with `add` and wake messages grant no new authority.
 
 Before joining, save a workflow checkpoint outside the checkout using [continuation guidance](references/continuation.md). It identifies the reviewed candidate, existing code-review assignment or required impact assessment, evidence, running jobs and next action. Keep the same file current after integration, review, validation and interruption.
 
@@ -11,9 +11,13 @@ Register from the original harness environment with its conversation UUID and wo
 
 ```sh
 repo-queue start
-repo-queue add <pr-url> --agent <codex-or-claude> --task <conversation-uuid> --cwd <worktree> \
+repo-queue submit <pr-url> --authorize-merge --agent <codex-or-claude> --task <conversation-uuid> --cwd <worktree> \
   --checkpoint <absolute-checkpoint-file>
 ```
+
+For an authorized GitHub stack prefix, add `--stack` only when the user has authorized all lower unmerged PRs through the selected PR. GitHub queues that prefix atomically through its stack-aware API. RepoQ records the selected scope and heads. If the effective rules cannot be read, submission fails instead of falling back to a local merge. Bitbucket and GitHub bases without a native queue retain the local turn workflow below. Use `add` only for intentionally legacy work; existing registrations keep their original mode and owner.
+
+When the returned entry includes `native`, GitHub owns merge order, combined validation and merge. Save its entry, token and authorization, then end the turn. The runtime observes the provider without model polling. `admission_pending` is not queue membership; `enqueued` and `validating` come from provider evidence. A repair wake means the original owner has readiness or ejection work, not a repository-wide lock. Claim or verify the repair turn using the commands below, diagnose and repair the cause, preserve technical gates, then run `repo-queue resume-native <entry-id> --token=<token>`. Save its replacement token and end the turn. Do not acquire a local turn, merge directly, or repeat routine validation approval requests already covered by explicit queue authorization. A changed scope, base or unrelated operation needs its own authority. An uncertain submission requires remote reconciliation before `resume-native --quiescent`; never blindly enqueue twice. `block` retains repair ownership but does not block unrelated PRs. Only provider-confirmed merge marks a native entry done; do not use `done` to claim that enqueueing succeeded. Completion is visible in `status`; repair wakes follow the ordinary delivery safeguards.
 
 Use the harness-provided identity. For Codex CLI, `CODEX_THREAD_ID` may supply it; in the desktop use the current task identity. For Claude, use the session UUID provided by the session interface or `claude agents --json`. Never substitute another task or create a new conversation to receive the turn. If the identity cannot be established, ask for it. For a Codex desktop owner on macOS using the default `CODEX_HOME`, add `--desktop` when registering. This opts in to loading that exact desktop task after native queue acceptance. Omit it for CLI owners, custom `CODEX_HOME`, and other agents. A successful activation request is not a claim.
 
@@ -30,7 +34,7 @@ This read-only check succeeds only for the matching owner, token and claimed sta
 
 After a successful claim or verification, read the returned `checkpoint_path` and follow the continuation guidance before dispatching more work. An older entry without a checkpoint continues from its original conversation.
 
-After the workflow succeeds and associated remote work has finished, run the wake message's `done` command. If blocked, run its `block` command with a concrete reason, explain what is needed and end the turn. A blocked entry retains the repository reservation.
+After the workflow succeeds and associated remote work has finished, run the wake message's `done` command. If blocked, run its `block` command with a concrete reason, explain what is needed and end the turn. A blocked legacy entry retains the repository reservation; a native entry retains only its repair owner.
 
 For delivery failure before claim, inspect `repo-queue status` and use `retry <id> --token=<token>` after resolving the cause. Retry returns a replacement token. If the owner was interrupted after claim or blocked, establish that the old owner and its remote jobs have stopped before `recover <id> --token=<token> --quiescent`. This also applies when this conversation returns to its own blocked entry after its blocker is resolved: first confirm the previous workflow and remote jobs have stopped. Recovery invalidates the old token and sends a new wake. After retry or recovery, save the replacement entry/token and end the turn; wait for that wake instead of claiming immediately. Never claim twice, release a turn because time passed, or report completion while remote work may still be running.
 

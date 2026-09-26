@@ -3,11 +3,12 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
+import { github } from './native.ts';
 import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { running, serve, start, stop } from './dispatcher.ts';
 import { verifyMergedGithub } from './merged-pr.ts';
-import { Store } from './store.ts';
+import { Store, pullRequest } from './store.ts';
 import type { Agent } from './types.ts';
 
 const help = `RepoQ — local pull request turns for coding agents
@@ -15,6 +16,10 @@ const help = `RepoQ — local pull request turns for coding agents
 Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
 
   add URL --agent codex|claude --task UUID [--cwd DIRECTORY] [--checkpoint FILE] [--desktop]
+  submit URL --agent codex|claude --task UUID --authorize-merge [--stack] [--cwd DIRECTORY]
+                                 Detect native queue; authorize required validation and merge
+  resume-native ID --token=TOKEN [--quiescent]
+                                 Resume the original owner’s repaired native candidate
   status                         Show queue state and overdue Codex claim alerts
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
@@ -34,8 +39,8 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
   doctor [--agent codex|claude]    Check runtime and agent executable access
   --version                      Print installed version
 
-All output is JSON except help/version. PR merge and CI authority remain
-with the agent. Default state: ~/.local/state/repo-queue, overridable with
+All output is JSON except help/version. Legacy merge and CI authority remain with the agent. Native submission requires
+explicit --authorize-merge authority for required validation and merge. Default state: ~/.local/state/repo-queue, overridable with
 REPO_QUEUE_STATE or --state. Keep state on a local filesystem.
 `;
 const options = {
@@ -43,9 +48,11 @@ const options = {
   cwd: { type: 'string' }, token: { type: 'string' }, reason: { type: 'string' },
   quiescent: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' }, checkpoint: { type: 'string' },
-  desktop: { type: 'boolean' },
+  desktop: { type: 'boolean' }, 'authorize-merge': { type: 'boolean' }, stack: { type: 'boolean' },
 } as const;
 const allowed: Record<string, readonly string[]> = {
+  submit: ['agent', 'task', 'cwd', 'checkpoint', 'desktop', 'authorize-merge', 'stack'],
+  'resume-native': ['token', 'quiescent'],
   add: ['agent', 'task', 'cwd', 'checkpoint', 'desktop'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
@@ -96,7 +103,7 @@ export async function main(args: string[]): Promise<void> {
     for (const name of Object.keys(values)) {
       if (name !== 'state' && !permitted.includes(name)) throw new Error(`--${name} is not supported by ${command}`);
     }
-    const hasOperand = ['add', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery', 'complete-merged'].includes(command);
+    const hasOperand = ['add', 'submit', 'resume-native', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery', 'complete-merged'].includes(command);
     if (positionals.length !== (hasOperand ? 2 : 1)) throw new Error(`${command} expects ${hasOperand ? 'one argument' : 'no arguments'}`);
     const state = statePath(values.state ?? process.env.REPO_QUEUE_STATE ?? resolve(homedir(), '.local/state/repo-queue'));
     let result: unknown;
@@ -131,15 +138,30 @@ export async function main(args: string[]): Promise<void> {
           } finally { ledger.close(); }
           break;
         }
-        if (command === 'add') {
+        if (command === 'add' || command === 'submit') {
           const task = required(values.task, '--task');
           if (!uuid.test(task)) throw new Error('--task must be the original conversation UUID');
           const owner = agent(values.agent);
           validateCodexOwner(owner, task);
           const cwd = realpathSync(values.cwd ?? process.cwd());
           if (!statSync(cwd).isDirectory()) throw new Error('--cwd must be a directory');
+          const url = required(positionals[1], 'PR URL');
+          let native;
+          if (command === 'submit') {
+            if (!values['authorize-merge']) throw new Error('submit requires --authorize-merge: explicit authority for required queue validation and merge');
+            const parsed = pullRequest(url);
+            if (parsed.provider === 'github') {
+              const observed = await github.inspect(parsed.repo, parsed.prNumber);
+              if (observed.required) {
+                if (observed.state !== 'OPEN') throw new Error('submit requires an open PR');
+                if (observed.members.length > 1 && !values.stack) throw new Error('GitHub will queue the lower stack members too; use --stack only when that whole prefix is authorized');
+                native = { base: observed.base, head: observed.head, members: observed.members };
+              }
+            }
+          }
           result = store.add({
-            url: required(positionals[1], 'PR URL'), agent: owner, task, cwd,
+            ...(native === undefined ? {} : { native }),
+            url, agent: owner, task, cwd,
             ...(values.desktop ? { desktop: true } : {}),
             ...(values.checkpoint === undefined ? {} : { checkpoint_path: resolve(cwd, required(values.checkpoint, '--checkpoint')) }),
           });
@@ -148,6 +170,24 @@ export async function main(args: string[]): Promise<void> {
         const id = required(positionals[1], 'entry ID');
         const token = required(values.token, '--token');
         switch (command) {
+          case 'resume-native': {
+            const entry = store.verifyOwnership(id, token);
+            if (!entry.native || entry.state !== 'claimed') throw new Error('resume-native requires the original claimed native repair turn');
+            if (entry.native.state === 'uncertain' && !values.quiescent) throw new Error('Uncertain submission requires --quiescent after confirming the remote request cannot still execute');
+            const observed = await github.inspect(entry.repo, entry.pr_number);
+            if (observed.state === 'MERGED') {
+              store.updateNative(id, entry.native, { ...entry.native, state: 'merged', detail: 'GitHub confirms this pull request is merged.' });
+              result = store.verifyOwnership(id, token);
+              break;
+            }
+            if (!observed.required || observed.state !== 'OPEN') throw new Error('Reconcile the PR and effective queue before resuming; it must be open and require the queue');
+            if (entry.native.request !== null && entry.native.state !== 'failed' && observed.queue === null) {
+              const request = await github.result(entry.repo, entry.pr_number, entry.native.request);
+              if (request.status !== 'failed' && !(request.status === 'unavailable' && values.quiescent)) throw new Error('The prior asynchronous request is not confirmed failed; reconcile it before resuming');
+            }
+            result = store.resumeNative(id, token, observed);
+            break;
+          }
           case 'claim': result = store.claim(id, token); break;
           case 'verify-claim': {
             const task = required(values.task, '--task');

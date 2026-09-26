@@ -1,14 +1,14 @@
 <p align="center"><img src="assets/repoq.svg" alt="RepoQ — One repository. One turn." width="720"></p>
 
-# Local PR turns for coding agents
+# PR queues for coding agents
 
-RepoQ gives each repository a waiting line. Your agent registers a pull request, ends its turn, and resumes when it is time to finish its merge workflow.
+RepoQ submits authorized PRs to GitHub’s native merge queue and wakes their original agent when readiness or repair work is needed. GitHub owns queue order, combined validation and merge. Repositories without a native queue keep RepoQ’s local waiting line.
 
 **Queue → yield → resume → claim → complete.**
 
 It supports GitHub and Bitbucket Cloud PR URLs, Codex local desktop conversations, and local Claude Code sessions. Separate repositories progress independently. Clones and worktrees share the same queue when they use the same local state directory.
 
-RepoQ schedules turns. Your agent still owns review, approvals, conflict resolution, validation, merge and deployment verification.
+Your agent still owns review, security gates, conflict resolution and repair. An explicit native queue authorization covers its required validation and merge; it does not authorize unrelated changes.
 
 ## Install
 
@@ -26,6 +26,19 @@ repo-queue start
 ```
 
 There is no published npm registry release yet. Install the package built from the repository rather than an unrelated package with a similar name. See [installation](docs/installation.md) for a user-local prefix, agent skills and background startup. Existing Python-preview users must follow the [upgrade instructions](docs/installation.md#upgrade-from-the-python-preview) before switching dispatchers.
+
+## Submit authorized queue work
+
+```sh
+repo-queue submit https://github.com/example/project/pull/42 \
+  --agent codex --task CONVERSATION_UUID --cwd /path/to/worktree --authorize-merge
+```
+
+`submit` reads the effective rules for the PR’s target branch, or its native stack’s base. A required GitHub merge queue uses the stack-aware asynchronous merge API with `merge_action=merge_queue` and the saved head SHA. Add `--stack` only when all lower unmerged PRs through the selected PR are authorized. API errors fail safely; they do not select a local merge. GitHub bases without a queue and Bitbucket use the existing local turn flow.
+
+Save the returned entry and end the agent turn. `status` exposes native authorization, scope, asynchronous request and provider state. Acceptance stays `admission_pending`; queue presence becomes `enqueued` or `validating`; removal or failure wakes the original owner. Repair with that wake’s claim/verify commands, then `resume-native ID --token=TOKEN`. It preserves authorization, records the repaired head and returns a new token. GitHub confirmation alone marks the entry `merged`/`done`. The runtime monitors every 30 seconds without model polling. Native repair work does not hold a repository-wide lock.
+
+`add` explicitly retains the legacy local queue. Existing entries never silently change mode. See [native operation and limitations](docs/operations.md#github-native-queues) and the [schema upgrade](docs/installation.md#upgrade-for-native-queues) before upgrading a live dispatcher.
 
 ## Give a PR its turn
 
@@ -85,12 +98,12 @@ Live adapter tests are opt-in and may consume account usage. Automated CI uses s
 
 ## What the queue guarantees
 
-- One reserved or claimed turn per repository in a shared local database.
+- One reserved or claimed legacy turn per repository in a shared local database; native repair turns progress independently.
 - Durable FIFO order, single-use claims and explicit recovery.
 - Independent progress across repositories and bounded delivery concurrency.
 - No provider credentials stored by RepoQ. Agent CLIs use their existing authentication.
 
-The queue coordinates one OS account on one machine. It does not stop people or other machines merging outside it, validate PR existence, or provide distributed locking. Tokens prevent stale operations; they do not isolate mutually untrusted programs running as the same OS user.
+The queue coordinates one OS account on one machine. It does not stop people or other machines acting outside it or provide distributed locking. Native submissions validate provider identity and rules; legacy registration does not validate PR existence. Tokens prevent stale operations; they do not isolate mutually untrusted programs running as the same OS user.
 
 ## Develop
 

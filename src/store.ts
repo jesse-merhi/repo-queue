@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
+import { parseNative, type NativePlan, type NativeQueue } from './native.ts';
 import {
   agents,
   deliveryStatuses,
@@ -25,7 +26,7 @@ import {
   type Provider,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAX_URL_LENGTH = 2_048;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_TASK_LENGTH = 64;
@@ -244,6 +245,7 @@ function parseStoredEntry(value: unknown): Entry {
   }
 
   return {
+    ...(row.native_payload === null || row.native_payload === undefined ? {} : { native: parseNative(JSON.parse(storedString(row, "native_payload", 100_000))) }),
     sequence,
     id,
     url,
@@ -337,7 +339,7 @@ function ownerConfig(input: Readonly<OwnerConfigInput>, cwd: string): OwnerConfi
   };
 }
 
-function pullRequest(input: unknown): PullRequest {
+export function pullRequest(input: unknown): PullRequest {
   if (typeof input !== "string" || input.length === 0) {
     throw new InvalidUrlError("pull request URL must be a non-empty string");
   }
@@ -495,10 +497,12 @@ export class Store {
           SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
           owner_configs.desktop AS desktop,
-          entry_checkpoints.path AS checkpoint_path
+          entry_checkpoints.path AS checkpoint_path,
+          native_queue.payload AS native_payload
           FROM entries
           LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
           LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+          LEFT JOIN native_queue ON native_queue.entry_id = entries.id
           WHERE entries.repo = ? AND entries.pr_number = ?
         `)
         .get(parsed.repo, parsed.prNumber);
@@ -516,6 +520,9 @@ export class Store {
           if (checkpointPath !== undefined && checkpointPath !== entry.checkpoint_path) {
             throw new ConflictError("pull request is already registered with a different checkpoint; update the original file");
           }
+          if ((input.native !== undefined) !== (entry.native !== undefined)) {
+            throw new ConflictError("existing registration retains its mode; legacy entries cannot silently migrate");
+          }
           return entry;
         }
         throw new ConflictError(
@@ -523,6 +530,12 @@ export class Store {
         );
       }
 
+      if (input.native !== undefined) {
+        const overlaps = this.list().some((entry) => entry.repo === parsed.repo && entry.state !== 'done' &&
+          (entry.native?.members ?? [{ number: entry.pr_number }]).some((member) =>
+            input.native?.members.some((candidate) => candidate.number === member.number)));
+        if (overlaps) throw new ConflictError('native scope overlaps an unfinished registration; preserve its original owner and finish or reconcile that work first');
+      }
       const timestamp = now();
       const id = randomUUID();
       this.database.prepare(`
@@ -555,6 +568,12 @@ export class Store {
       if (checkpointPath !== undefined) {
         this.database.prepare("INSERT INTO entry_checkpoints (entry_id, path) VALUES (?, ?)").run(id, checkpointPath);
       }
+      if (input.native !== undefined) {
+        if (parsed.provider !== "github") throw new StateError("native queues require GitHub");
+        const native = parseNative({ ...input.native, authorized_at: new Date().toISOString(), state: 'admission_pending', request: null, detail: '', next_check: 0 });
+        if (native.members.at(-1)?.number !== parsed.prNumber || native.members.at(-1)?.head !== native.head) throw new StateError("native plan does not match registered PR");
+        this.database.prepare("INSERT INTO native_queue (entry_id, payload) VALUES (?, ?)").run(id, JSON.stringify(native));
+      }
       return this.updated(id);
     });
   }
@@ -565,10 +584,12 @@ export class Store {
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
           owner_configs.desktop AS desktop,
-          entry_checkpoints.path AS checkpoint_path
+          entry_checkpoints.path AS checkpoint_path,
+          native_queue.payload AS native_payload
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
         LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+          LEFT JOIN native_queue ON native_queue.entry_id = entries.id
         ORDER BY entries.sequence
       `)
       .all()
@@ -581,17 +602,20 @@ export class Store {
         SELECT candidate.id
         FROM entries AS candidate
         WHERE candidate.state = 'waiting'
+          AND NOT EXISTS (SELECT 1 FROM native_queue WHERE entry_id = candidate.id)
           AND candidate.sequence = (
             SELECT MIN(waiter.sequence)
             FROM entries AS waiter
             WHERE waiter.repo = candidate.repo
               AND waiter.state = 'waiting'
+              AND NOT EXISTS (SELECT 1 FROM native_queue WHERE entry_id = waiter.id)
           )
           AND NOT EXISTS (
             SELECT 1
             FROM entries AS active
             WHERE active.repo = candidate.repo
               AND active.state IN ('reserved', 'claimed', 'blocked')
+              AND NOT EXISTS (SELECT 1 FROM native_queue WHERE entry_id = active.id)
           )
         ORDER BY candidate.sequence
       `).all();
@@ -677,6 +701,7 @@ export class Store {
   done(id: string, suppliedToken: string): Entry {
     return this.write(() => {
       const entry = this.owned(id, suppliedToken);
+      if (entry.native !== undefined && entry.native.state !== "merged") throw new StateError("only provider-confirmed merge completes a native entry");
       if (entry.state === "done") {
         return entry;
       }
@@ -794,10 +819,12 @@ export class Store {
       SELECT entries.*, owner_configs.config_root AS owner_config_root,
         owner_configs.env_explicit AS owner_config_explicit,
         owner_configs.desktop AS desktop,
-        entry_checkpoints.path AS checkpoint_path
+        entry_checkpoints.path AS checkpoint_path,
+          native_queue.payload AS native_payload
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
       LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+          LEFT JOIN native_queue ON native_queue.entry_id = entries.id
       WHERE entries.state = 'reserved' AND entries.delivery_status = 'pending'
       ORDER BY entries.sequence
     `).all().map((row) => parseStoredEntry(row));
@@ -808,10 +835,12 @@ export class Store {
       SELECT entries.*, owner_configs.config_root AS owner_config_root,
         owner_configs.env_explicit AS owner_config_explicit,
         owner_configs.desktop AS desktop,
-        entry_checkpoints.path AS checkpoint_path
+        entry_checkpoints.path AS checkpoint_path,
+          native_queue.payload AS native_payload
       FROM entries
       LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
       LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+          LEFT JOIN native_queue ON native_queue.entry_id = entries.id
       WHERE entries.agent = 'codex' AND entries.state = 'reserved'
         AND entries.delivery_status = 'sent'
       ORDER BY entries.sequence
@@ -886,6 +915,37 @@ export class Store {
     });
   }
 
+  /** Compare persisted observation to reject stale async callbacks after an owner resumes. */
+  updateNative(id: string, expected: NativeQueue, next: NativeQueue, notify = false): boolean {
+    const validated = parseNative(next);
+    return this.write(() => {
+      const entry = this.updated(id);
+      if (JSON.stringify(entry.native) !== JSON.stringify(expected)) return false;
+      this.database.prepare("UPDATE native_queue SET payload = ? WHERE entry_id = ?").run(JSON.stringify(validated), id);
+      if (next.state === 'merged') {
+        this.database.prepare("UPDATE entries SET state = 'done', updated_at = ? WHERE id = ?").run(now(), id);
+      } else if (notify && entry.state === 'waiting') {
+        this.database.prepare("UPDATE entries SET state = 'reserved', delivery_status = 'pending', updated_at = ? WHERE id = ?").run(now(), id);
+      }
+      return true;
+    });
+  }
+
+  resumeNative(id: string, suppliedToken: string, plan: NativePlan): Entry {
+    return this.write(() => {
+      const entry = this.owned(id, suppliedToken);
+      if (!entry.native || entry.state !== 'claimed') throw new StateError('native resume requires the original claimed repair turn');
+      if (plan.base !== entry.native.base || plan.members.some((member) => !entry.native?.members.some((original) => original.number === member.number))) {
+        throw new StateError('native resume cannot expand authorized stack membership or change its base');
+      }
+      const native = parseNative({ ...plan, authorized_at: entry.native.authorized_at, state: 'admission_pending', request: null, detail: '', next_check: 0 });
+      this.database.prepare("UPDATE native_queue SET payload = ? WHERE entry_id = ?").run(JSON.stringify(native), id);
+      this.database.prepare("UPDATE entries SET state = 'waiting', token = ?, delivery_status = 'pending', delivery_error = '', block_reason = '', updated_at = ? WHERE id = ?")
+        .run(token(), now(), id);
+      return this.updated(id);
+    });
+  }
+
   private initialize(): void {
     this.write(() => {
       const versionRow = this.database.prepare("PRAGMA user_version").get();
@@ -940,6 +1000,10 @@ export class Store {
           merged_at TEXT NOT NULL,
           completed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS native_queue (
+          entry_id TEXT PRIMARY KEY REFERENCES entries(id),
+          payload TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS owner_configs (
           entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
           config_root TEXT NOT NULL,
@@ -990,10 +1054,12 @@ export class Store {
         SELECT entries.*, owner_configs.config_root AS owner_config_root,
           owner_configs.env_explicit AS owner_config_explicit,
           owner_configs.desktop AS desktop,
-          entry_checkpoints.path AS checkpoint_path
+          entry_checkpoints.path AS checkpoint_path,
+          native_queue.payload AS native_payload
         FROM entries
         LEFT JOIN owner_configs ON owner_configs.entry_id = entries.id
         LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
+          LEFT JOIN native_queue ON native_queue.entry_id = entries.id
         WHERE entries.id = ?
       `)
       .get(validatedId);

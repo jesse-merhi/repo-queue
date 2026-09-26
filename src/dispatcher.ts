@@ -14,6 +14,7 @@ import {
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
+import { monitorNative } from './native-monitor.ts';
 import { activateCodexTask, deliver } from './adapters.ts';
 import { overdueCodexClaims } from './claim-watch.ts';
 import { DeliveryLedger, type DeliveryAttempt } from './delivery-ledger.ts';
@@ -194,6 +195,19 @@ export function wakeMessage(entry: Entry, state: string): string {
   const command = [process.execPath, resolve(entrypoint), '--state', resolve(state)].map(shellWord).join(' ');
   const claim = [entry.id, `--token=${entry.token}`].map(shellWord).join(' ');
   const owner = ['--agent', entry.agent, '--task', entry.task, '--cwd', entry.cwd].map(shellWord).join(' ');
+  if (entry.native !== undefined) {
+    return `GitHub queue work for ${entry.url} needs its original owner. Provider state: ${entry.native.state}. ` +
+      `Evidence: ${JSON.stringify(entry.native.detail)}. This is a repair turn, not a repository merge lock. ` +
+      `First run: ${command} claim ${claim}. If already claimed, run: ${command} verify-claim ${claim} ${owner}. ` +
+      'Continue only after successful ownership verification. Preserve the authorized PR/stack scope and all technical review and security gates. ' +
+      (entry.checkpoint_path === undefined ? '' : `Read the workflow checkpoint at ${JSON.stringify(entry.checkpoint_path)}. `) +
+      'The saved explicit queue authorization covers its required validation and merge; do not ask again for routine queue validation. ' +
+      'Diagnose and repair readiness failures in this original conversation. Do not merge directly or acquire a repository lock. ' +
+      `After repairs and verification run: ${command} resume-native ${claim}. ` +
+      'For an uncertain submission, first establish that the remote request has finished or cannot execute, then add --quiescent. ' +
+      `If blocked, run: ${command} block ${claim} --reason <reason>. ` +
+      'GitHub owns ordering, combined validation, ejection and merge; accepted messages or requests do not prove success.';
+  }
   return `Your PR ${entry.url} has the repository turn. On the first wake run: ${command} claim ${claim}. ` +
     'Save its successful result. If this conversation already claimed this entry, do not claim again; ' +
     `confirm this is your original conversation and worktree, then run: ${command} verify-claim ${claim} ${owner}. ` +
@@ -260,12 +274,19 @@ export async function serve(state: string): Promise<void> {
 
   const store = new Store(stateDirectory);
   const admissionLedger = new DeliveryLedger(stateDirectory);
+  let nativePass: Promise<void> | undefined;
   const activeOwners = new Map<string, Promise<void>>();
   const reportedClaims = new Map<string, string>();
   const deliveryLifecycle = new AbortController();
   try {
     store.markUncertain();
     while (!stopped()) {
+      if (nativePass === undefined) {
+        const nativeStore = new Store(stateDirectory);
+        nativePass = monitorNative(nativeStore, undefined, stopped)
+          .catch(() => { process.stderr.write('repo-queue: native monitoring failed; inspect durable state\n'); })
+          .finally(() => { nativeStore.close(); nativePass = undefined; });
+      }
       admissionLedger.reconcile();
       store.reserve();
       const claimAlerts = overdueCodexClaims(store.acceptedCodexWakes());

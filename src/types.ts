@@ -1,3 +1,4 @@
+import type { NativePlan, NativeQueue } from './native.ts';
 export const agents = ["codex", "claude"] as const;
 export type Agent = (typeof agents)[number];
 
@@ -23,6 +24,7 @@ export const deliveryStatuses = [
 export type DeliveryStatus = (typeof deliveryStatuses)[number];
 
 export interface Entry {
+  native?: NativeQueue;
   sequence: number;
   id: string;
   url: string;
@@ -46,6 +48,7 @@ export interface Entry {
 }
 
 export interface AddEntryInput {
+  native?: NativePlan;
   url: string;
   agent: Agent;
   task: string;
