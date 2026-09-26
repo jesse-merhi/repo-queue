@@ -56,7 +56,7 @@ Old commands reject schema 4 instead of processing native work as legacy turns. 
 
 Native GitHub operation requires authenticated `gh` on the dispatcher PATH, PR and GraphQL access to the actual target branch’s native queue, and Contents write permission for the asynchronous merge API. The shipped adapter targets github.com, including Enterprise Cloud; Enterprise Server hosts are not supported. It never changes branch rules or CI configuration. Deploy required `merge_group` validation before enabling a repository’s native queue.
 
-Previously accepted, unclaimed desktop wakes are not reactivated by an upgrade. The saved desktop flag and original task remain unchanged; inspect that task before intervening. Do not rotate tokens or resend accepted messages solely because the dispatcher changed. If a wake still contains an old executable path, establish its delivery and owner state before reconciling it; do not run a schema-3 command against schema 4.
+Previously accepted, unclaimed desktop wakes are not reactivated by an upgrade. The saved desktop flag and original task remain unchanged; inspect that task before intervening. Do not rotate tokens or resend accepted messages solely because the dispatcher changed. If a wake still contains an old executable path, first inspect the original entry, delivery and claim state. Then use the current installed CLI with the same original owner and token: `claim` only an unclaimed reservation, or `verify-claim` for an existing claim. Never rotate the token or claim twice merely because the executable path changed. Do not run a schema-3 command against schema 4.
 
 ## Upgrade from the Python preview
 
