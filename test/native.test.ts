@@ -189,7 +189,7 @@ test('schema 3 migration preserves legacy claimed and reserved ownership exactly
       assert.equal(upgraded.reserve().length, 0);
       assert.equal(upgraded.verifyOwnership(claimed.id, claimed.token).state, 'claimed');
       const reader = new DatabaseSync(upgraded.databasePath);
-      try { assert.equal(reader.prepare('PRAGMA user_version').get()?.user_version, 4); }
+      try { assert.equal(reader.prepare('PRAGMA user_version').get()?.user_version, 5); }
       finally { reader.close(); }
     } finally { upgraded.close(); }
   });

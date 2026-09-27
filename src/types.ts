@@ -65,3 +65,10 @@ export interface AdministrativeCompletion {
   merged_at: string;
   completed_at: string;
 }
+
+export interface Reentry {
+  previous_entry_id: string;
+  entry_id: string;
+  reason: string;
+  created_at: string;
+}
