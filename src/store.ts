@@ -24,9 +24,32 @@ import {
   type AdministrativeCompletion,
   type Entry,
   type Provider,
+  type Reentry,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+const ENTRY_COLUMNS = `
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  task TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (
+    state IN ('waiting', 'reserved', 'claimed', 'blocked', 'done')
+  ),
+  token TEXT,
+  block_reason TEXT NOT NULL DEFAULT '',
+  delivery_status TEXT NOT NULL CHECK (
+    delivery_status IN ('pending', 'sending', 'sent', 'failed', 'uncertain')
+  ),
+  delivery_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+`;
 const MAX_URL_LENGTH = 2_048;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_TASK_LENGTH = 64;
@@ -290,6 +313,16 @@ function boundedString(
   return value;
 }
 
+function validateCheckpoint(value: string): string {
+  const path = boundedString(value, "checkpoint path", MAX_PATH_LENGTH);
+  if (!isAbsolute(path)) throw new TypeError("checkpoint path must be absolute");
+  const checkpoint = realpathSync(path);
+  if (checkpoint.length > MAX_PATH_LENGTH || !statSync(checkpoint).isFile()) {
+    throw new TypeError("checkpoint must be a regular file with a bounded absolute path");
+  }
+  return checkpoint;
+}
+
 function configEnvironmentVariable(agent: Entry["agent"]): "CODEX_HOME" | "CLAUDE_CONFIG_DIR" {
   return agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR";
 }
@@ -297,6 +330,8 @@ function configEnvironmentVariable(agent: Entry["agent"]): "CODEX_HOME" | "CLAUD
 function defaultConfigRoot(agent: Entry["agent"]): string {
   return join(homedir(), agent === "codex" ? ".codex" : ".claude");
 }
+
+type OwnerIdentity = Pick<AddEntryInput, "agent" | "task" | "cwd" | "owner_config_root">;
 
 type OwnerConfigInput = Pick<
   AddEntryInput,
@@ -481,15 +516,7 @@ export class Store {
     if (input.desktop && (input.agent !== "codex" || config.root !== defaultConfigRoot("codex"))) {
       throw new TypeError("--desktop requires a Codex owner using the default CODEX_HOME");
     }
-    let checkpointPath: string | undefined;
-    if (input.checkpoint_path !== undefined) {
-      const path = boundedString(input.checkpoint_path, "checkpoint path", MAX_PATH_LENGTH);
-      if (!isAbsolute(path)) throw new TypeError("checkpoint path must be absolute");
-      checkpointPath = realpathSync(path);
-      if (checkpointPath.length > MAX_PATH_LENGTH || !statSync(checkpointPath).isFile()) {
-        throw new TypeError("checkpoint must be a regular file with a bounded absolute path");
-      }
-    }
+    const checkpointPath = input.checkpoint_path === undefined ? undefined : validateCheckpoint(input.checkpoint_path);
 
     return this.write(() => {
       const existing = this.database
@@ -504,6 +531,7 @@ export class Store {
           LEFT JOIN entry_checkpoints ON entry_checkpoints.entry_id = entries.id
           LEFT JOIN native_queue ON native_queue.entry_id = entries.id
           WHERE entries.repo = ? AND entries.pr_number = ?
+          ORDER BY entries.sequence DESC LIMIT 1
         `)
         .get(parsed.repo, parsed.prNumber);
       if (existing !== undefined) {
@@ -521,7 +549,9 @@ export class Store {
             throw new ConflictError("pull request is already registered with a different checkpoint; update the original file");
           }
           if ((input.native !== undefined) !== (entry.native !== undefined)) {
-            throw new ConflictError("existing registration retains its mode; legacy entries cannot silently migrate");
+            const guidance = entry.state === 'done' && entry.native === undefined
+              ? `; after native preparation, use reenter ${entry.id} (see --help)` : '';
+            throw new ConflictError(`existing registration retains its mode; legacy entries cannot silently migrate${guidance}`);
           }
           return entry;
         }
@@ -530,11 +560,7 @@ export class Store {
         );
       }
 
-      const scope = input.native?.members ?? [{ number: parsed.prNumber }];
-      const overlaps = this.list().some((entry) => entry.repo === parsed.repo && entry.state !== 'done' &&
-        (entry.native?.members ?? [{ number: entry.pr_number }]).some((member) =>
-          scope.some((candidate) => candidate.number === member.number)));
-      if (overlaps) throw new ConflictError('PR scope overlaps an unfinished registration; preserve its original owner and finish or reconcile that work first');
+      this.requireAvailableScope(parsed.repo, input.native?.members ?? [{ number: parsed.prNumber }]);
       const timestamp = now();
       const id = randomUUID();
       this.database.prepare(`
@@ -650,7 +676,7 @@ export class Store {
   verifyClaim(
     id: string,
     suppliedToken: string,
-    owner: Readonly<Pick<AddEntryInput, "agent" | "task" | "cwd" | "owner_config_root">>,
+    owner: Readonly<OwnerIdentity>,
   ): Entry {
     const entry = this.owned(id, suppliedToken);
     if (entry.state !== "claimed") {
@@ -658,6 +684,14 @@ export class Store {
         `queue entry claim cannot be verified from state ${entry.state}`,
       );
     }
+    this.verifyOwner(entry, owner);
+    return entry;
+  }
+
+  private verifyOwner(
+    entry: Entry,
+    owner: Readonly<OwnerIdentity>,
+  ): void {
     if (!member(owner.agent, agents)) {
       throw new TypeError("agent must be codex or claude");
     }
@@ -687,10 +721,93 @@ export class Store {
         entry.owner_config_explicit !== config.explicit)
     ) {
       throw new OwnershipError(
-        "queue entry is claimed by a different agent, task, cwd, or configuration root",
+        "queue entry belongs to a different agent, task, cwd, or configuration root",
       );
     }
+  }
+
+  reentryCandidate(
+    id: string,
+    suppliedToken: string,
+    owner: Readonly<OwnerIdentity>,
+  ): Entry {
+    const entry = this.owned(id, suppliedToken);
+    if (entry.state !== 'done' || entry.native || entry.provider !== 'github') {
+      throw new StateError('reenter requires a completed legacy GitHub entry');
+    }
+    if (entry.owner_config_root === undefined) {
+      throw new OwnershipError('reenter requires a known original configuration root');
+    }
+    this.verifyOwner(entry, owner);
+    const successor = this.database.prepare('SELECT entry_id FROM reentries WHERE previous_entry_id = ?').get(id);
+    if (successor !== undefined) {
+      throw new ConflictError(`completed entry already has successor ${storedString(record(successor), 'entry_id', MAX_TASK_LENGTH)}; inspect status and continue that attempt with its own token`);
+    }
     return entry;
+  }
+
+  reenter(
+    id: string,
+    suppliedToken: string,
+    owner: Readonly<OwnerIdentity>,
+    plan: NativePlan,
+    reason: string,
+    checkpointPath?: string,
+  ): Entry {
+    const auditReason = boundedString(reason, 'reentry reason', MAX_MESSAGE_LENGTH);
+    if (!auditReason.trim()) throw new TypeError('reentry reason must be non-empty');
+    return this.write(() => {
+      const previous = this.reentryCandidate(id, suppliedToken, owner);
+      if (auditReason.includes(suppliedToken)) throw new TypeError('reentry reason must not contain the ownership token');
+      const requestedCheckpoint = checkpointPath ?? previous.checkpoint_path;
+      if (requestedCheckpoint === undefined) throw new StateError('reenter requires a prepared checkpoint; supply --checkpoint for this new attempt');
+      const checkpoint = validateCheckpoint(requestedCheckpoint);
+      if (previous.checkpoint_path !== undefined && checkpoint !== previous.checkpoint_path) {
+        throw new ConflictError('reenter must preserve the saved checkpoint path; update or restore the original file');
+      }
+      const native = parseNative({ ...plan, authorized_at: new Date().toISOString(), state: 'admission_pending', request: null, detail: '', next_check: 0 });
+      if (native.members.at(-1)?.number !== previous.pr_number || native.members.at(-1)?.head !== native.head) {
+        throw new StateError('native plan does not match registered PR');
+      }
+      this.requireAvailableScope(previous.repo, native.members);
+      const successor = randomUUID();
+      const timestamp = now();
+      this.database.prepare(`
+        INSERT INTO entries (
+          id, url, provider, repo, pr_number, agent, task, cwd,
+          state, token, block_reason, delivery_status, delivery_error, created_at, updated_at
+        ) SELECT ?, url, provider, repo, pr_number, agent, task, cwd,
+          'waiting', ?, '', 'pending', '', ?, ? FROM entries WHERE id = ?
+      `).run(successor, token(), timestamp, timestamp, id);
+      this.database.prepare(`
+        INSERT INTO owner_configs (entry_id, config_root, env_explicit, desktop)
+        SELECT ?, config_root, env_explicit, desktop FROM owner_configs WHERE entry_id = ?
+      `).run(successor, id);
+      this.database.prepare('INSERT INTO entry_checkpoints (entry_id, path) VALUES (?, ?)').run(successor, checkpoint);
+      this.database.prepare('INSERT INTO native_queue (entry_id, payload) VALUES (?, ?)').run(successor, JSON.stringify(native));
+      this.database.prepare('INSERT INTO reentries (previous_entry_id, entry_id, reason, created_at) VALUES (?, ?, ?, ?)')
+        .run(id, successor, auditReason, timestamp);
+      return this.updated(successor);
+    });
+  }
+
+  reentries(): Reentry[] {
+    return this.database.prepare('SELECT previous_entry_id, entry_id, reason, created_at FROM reentries ORDER BY created_at').all().map((value) => {
+      const row = record(value);
+      return {
+        previous_entry_id: storedString(row, 'previous_entry_id', MAX_TASK_LENGTH),
+        entry_id: storedString(row, 'entry_id', MAX_TASK_LENGTH),
+        reason: storedString(row, 'reason', MAX_MESSAGE_LENGTH),
+        created_at: storedString(row, 'created_at', MAX_TIMESTAMP_LENGTH),
+      };
+    });
+  }
+
+  private requireAvailableScope(repo: string, scope: readonly { number: number }[]): void {
+    const overlaps = this.list().some((entry) => entry.repo === repo && entry.state !== 'done' &&
+      (entry.native?.members ?? [{ number: entry.pr_number }]).some((member) =>
+        scope.some((candidate) => candidate.number === member.number)));
+    if (overlaps) throw new ConflictError('PR scope overlaps an unfinished registration; preserve its original owner and finish or reconcile that work first');
   }
 
   verifyOwnership(id: string, suppliedToken: string): Entry {
@@ -946,90 +1063,100 @@ export class Store {
   }
 
   private initialize(): void {
-    this.write(() => {
-      const versionRow = this.database.prepare("PRAGMA user_version").get();
-      const versionRecord = record(versionRow);
-      const versionValue = versionRecord.user_version;
-      if (
-        typeof versionValue !== "number" ||
-        !Number.isSafeInteger(versionValue) ||
-        versionValue < 0
-      ) {
-        throw new SchemaVersionError("database has an invalid schema version");
-      }
-      if (versionValue > SCHEMA_VERSION) {
-        throw new SchemaVersionError(
-          `database schema version ${versionValue} is newer than supported version ${SCHEMA_VERSION}`,
-        );
-      }
-      this.database.exec(`
-        CREATE TABLE IF NOT EXISTS entries (
-          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-          id TEXT NOT NULL UNIQUE,
-          url TEXT NOT NULL UNIQUE,
-          provider TEXT NOT NULL,
-          repo TEXT NOT NULL,
-          pr_number INTEGER NOT NULL,
-          agent TEXT NOT NULL,
-          task TEXT NOT NULL,
-          cwd TEXT NOT NULL,
-          state TEXT NOT NULL CHECK (
-            state IN ('waiting', 'reserved', 'claimed', 'blocked', 'done')
-          ),
-          token TEXT,
-          block_reason TEXT NOT NULL DEFAULT '',
-          delivery_status TEXT NOT NULL CHECK (
-            delivery_status IN ('pending', 'sending', 'sent', 'failed', 'uncertain')
-          ),
-          delivery_error TEXT NOT NULL DEFAULT '',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE (repo, pr_number)
-        );
-        CREATE INDEX IF NOT EXISTS entries_repo_state_sequence
-          ON entries (repo, state, sequence);
-        CREATE TABLE IF NOT EXISTS entry_checkpoints (
-          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
-          path TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS administrative_completions (
-          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
-          reason TEXT NOT NULL,
-          verified_url TEXT NOT NULL,
-          merged_at TEXT NOT NULL,
-          completed_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS native_queue (
-          entry_id TEXT PRIMARY KEY REFERENCES entries(id),
-          payload TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS owner_configs (
-          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
-          config_root TEXT NOT NULL,
-          env_explicit INTEGER CHECK (
-            env_explicit IN (0, 1) OR env_explicit IS NULL
-          ),
-          desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
-        );
-      `);
-      if (versionValue === 1) {
+    // Rebuild the parent without cascading deletes or rewriting child foreign keys.
+    // Foreign-key enforcement must be changed outside the transaction.
+    this.database.exec('PRAGMA foreign_keys = OFF');
+    try {
+      this.write(() => {
+        const versionRow = this.database.prepare("PRAGMA user_version").get();
+        const versionRecord = record(versionRow);
+        const versionValue = versionRecord.user_version;
+        if (
+          typeof versionValue !== "number" ||
+          !Number.isSafeInteger(versionValue) ||
+          versionValue < 0
+        ) {
+          throw new SchemaVersionError("database has an invalid schema version");
+        }
+        if (versionValue > SCHEMA_VERSION) {
+          throw new SchemaVersionError(
+            `database schema version ${versionValue} is newer than supported version ${SCHEMA_VERSION}`,
+          );
+        }
         this.database.exec(`
-          ALTER TABLE owner_configs ADD COLUMN env_explicit INTEGER CHECK (
-            env_explicit IN (0, 1) OR env_explicit IS NULL
-          )
+          CREATE TABLE IF NOT EXISTS entries (${ENTRY_COLUMNS});
+          CREATE TABLE IF NOT EXISTS entry_checkpoints (
+            entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+            path TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS administrative_completions (
+            entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+            reason TEXT NOT NULL,
+            verified_url TEXT NOT NULL,
+            merged_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS native_queue (
+            entry_id TEXT PRIMARY KEY REFERENCES entries(id),
+            payload TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS owner_configs (
+            entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+            config_root TEXT NOT NULL,
+            env_explicit INTEGER CHECK (
+              env_explicit IN (0, 1) OR env_explicit IS NULL
+            ),
+            desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
+          );
         `);
-      }
-      const hasDesktop = this.database.prepare("PRAGMA table_info(owner_configs)").all()
-        .some((column) => column.name === "desktop");
-      if (!hasDesktop) {
+        if (versionValue === 1) {
+          this.database.exec(`
+            ALTER TABLE owner_configs ADD COLUMN env_explicit INTEGER CHECK (
+              env_explicit IN (0, 1) OR env_explicit IS NULL
+            )
+          `);
+        }
+        const hasDesktop = this.database.prepare("PRAGMA table_info(owner_configs)").all()
+          .some((column) => column.name === "desktop");
+        if (!hasDesktop) {
+          this.database.exec(`
+            ALTER TABLE owner_configs ADD COLUMN desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
+          `);
+        }
+        if (versionValue < 5) {
+          const sequence = this.database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'entries'").get();
+          this.database.exec(`
+            CREATE TABLE entries_v5 (${ENTRY_COLUMNS});
+            INSERT INTO entries_v5 SELECT * FROM entries;
+            DROP TABLE entries;
+            ALTER TABLE entries_v5 RENAME TO entries;
+          `);
+          if (sequence !== undefined) {
+            this.database.prepare("DELETE FROM sqlite_sequence WHERE name = 'entries'").run();
+            this.database.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('entries', ?)").run(sequence.seq ?? 0);
+          }
+        }
         this.database.exec(`
-          ALTER TABLE owner_configs ADD COLUMN desktop INTEGER NOT NULL DEFAULT 0 CHECK (desktop IN (0, 1))
+          CREATE INDEX IF NOT EXISTS entries_repo_state_sequence ON entries (repo, state, sequence);
+          CREATE UNIQUE INDEX IF NOT EXISTS entries_active_url ON entries (url) WHERE state != 'done';
+          CREATE UNIQUE INDEX IF NOT EXISTS entries_active_pr ON entries (repo, pr_number) WHERE state != 'done';
+          CREATE TABLE IF NOT EXISTS reentries (
+            previous_entry_id TEXT PRIMARY KEY REFERENCES entries(id),
+            entry_id TEXT NOT NULL UNIQUE REFERENCES entries(id),
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
         `);
-      }
-      if (versionValue < SCHEMA_VERSION) {
-        this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      }
-    });
+        if (versionValue < SCHEMA_VERSION) {
+          if (this.database.prepare('PRAGMA foreign_key_check').all().length !== 0) {
+            throw new SchemaVersionError('database migration found invalid foreign-key references');
+          }
+          this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+        }
+      });
+    } finally {
+      this.database.exec('PRAGMA foreign_keys = ON');
+    }
   }
 
   private write<T>(operation: () => T): T {

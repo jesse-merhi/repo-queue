@@ -20,6 +20,10 @@ Usage: repo-queue [--state DIRECTORY] COMMAND [OPTIONS]
                                  Detect native queue; authorize required validation and merge
   resume-native ID --token=TOKEN [--quiescent]
                                  Resume the original owner’s repaired native candidate
+  reenter ID --token=TOKEN --agent codex|claude --task UUID [--cwd DIRECTORY]
+             --quiescent --authorize-merge --reason TEXT [--stack] [--checkpoint FILE]
+                                 Create a native attempt after a completed legacy turn
+                                 Use its saved checkpoint, or supply one if none was saved
   status                         Show queue state and overdue Codex claim alerts
   start                          Start the detached dispatcher
   stop                           Stop dispatching; retain reservations
@@ -53,6 +57,7 @@ const options = {
 const allowed: Record<string, readonly string[]> = {
   submit: ['agent', 'task', 'cwd', 'checkpoint', 'desktop', 'authorize-merge', 'stack'],
   'resume-native': ['token', 'quiescent'],
+  reenter: ['token', 'agent', 'task', 'cwd', 'quiescent', 'authorize-merge', 'reason', 'stack', 'checkpoint'],
   add: ['agent', 'task', 'cwd', 'checkpoint', 'desktop'], status: [], start: [], stop: [], serve: [],
   claim: ['token'], done: ['token'], block: ['token', 'reason'],
   'verify-claim': ['token', 'agent', 'task', 'cwd'],
@@ -103,7 +108,7 @@ export async function main(args: string[]): Promise<void> {
     for (const name of Object.keys(values)) {
       if (name !== 'state' && !permitted.includes(name)) throw new Error(`--${name} is not supported by ${command}`);
     }
-    const hasOperand = ['add', 'submit', 'resume-native', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery', 'complete-merged'].includes(command);
+    const hasOperand = ['add', 'submit', 'reenter', 'resume-native', 'claim', 'verify-claim', 'done', 'block', 'retry', 'recover', 'reconcile-delivery', 'complete-merged'].includes(command);
     if (positionals.length !== (hasOperand ? 2 : 1)) throw new Error(`${command} expects ${hasOperand ? 'one argument' : 'no arguments'}`);
     const state = statePath(values.state ?? process.env.REPO_QUEUE_STATE ?? resolve(homedir(), '.local/state/repo-queue'));
     let result: unknown;
@@ -134,6 +139,7 @@ export async function main(args: string[]): Promise<void> {
               delivery_alerts: overdueCodexClaims(entries),
               delivery_attempts: ledger.list(),
               administrative_completions: store.administrativeCompletions(),
+              reentries: store.reentries(),
             };
           } finally { ledger.close(); }
           break;
@@ -170,6 +176,34 @@ export async function main(args: string[]): Promise<void> {
         const id = required(positionals[1], 'entry ID');
         const token = required(values.token, '--token');
         switch (command) {
+          case 'reenter': {
+            if (!values.quiescent) throw new Error('Reentry requires --quiescent: confirm the previous workflow and remote work have stopped');
+            if (!values['authorize-merge']) throw new Error('Reentry requires --authorize-merge for the prepared native candidate');
+            const reason = required(values.reason, '--reason');
+            const task = required(values.task, '--task');
+            const owner = agent(values.agent);
+            validateCodexOwner(owner, task);
+            const identity = { agent: owner, task, cwd: realpathSync(values.cwd ?? process.cwd()) };
+            const entry = store.reentryCandidate(id, token, identity);
+            const ledger = new DeliveryLedger(state);
+            try {
+              const requireNoDelivery = (): void => {
+                if (ledger.list().some((attempt) => attempt.entry_id === id)) {
+                  throw new Error('Previous delivery is active or unreconciled; resolve it before reentry');
+                }
+              };
+              requireNoDelivery();
+              const observed = await github.inspect(entry.repo, entry.pr_number);
+              if (observed.state !== 'OPEN') throw new Error('Reentry requires an open PR');
+              if (!observed.required) throw new Error('Reentry requires a native GitHub queue on the current target');
+              if (observed.queue !== null) throw new Error('PR is already in the GitHub queue; reconcile that work before reentry');
+              if (observed.members.length > 1 && !values.stack) throw new Error('GitHub will queue the lower stack members too; use --stack only when that whole prefix is authorized');
+              requireNoDelivery();
+              result = store.reenter(id, token, identity, observed, reason,
+                values.checkpoint === undefined ? undefined : resolve(identity.cwd, required(values.checkpoint, '--checkpoint')));
+            } finally { ledger.close(); }
+            break;
+          }
           case 'resume-native': {
             const entry = store.verifyOwnership(id, token);
             if (!entry.native || entry.state !== 'claimed') throw new Error('resume-native requires the original claimed native repair turn');

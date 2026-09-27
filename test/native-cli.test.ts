@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { stop } from '../src/dispatcher.ts';
+import { DeliveryLedger } from '../src/delivery-ledger.ts';
 import { monitorNative } from '../src/native-monitor.ts';
 import { Store } from '../src/store.ts';
 
@@ -38,7 +39,7 @@ if (args.includes('graphql') && args.some(x=>x.includes('mergeQueue(branch:'))) 
  else if (phase==='queue-graphql-error') result={errors:[{message:'Cannot read target queue'}],data:{repository:{mergeQueue:null}}};
  else result={data:{repository:{mergeQueue:phase==='legacy'||!args.includes('branch='+target)?null:{id:'fixture-queue'}}}};
 }
-else if (args.includes('graphql')) result={data:{repository:{pullRequest:{headRefOid:head,state:phase==='merged'?'MERGED':'OPEN',mergeQueueEntry:phase==='queued'?{state:'QUEUED'}:phase==='validating'?{state:'AWAITING_CHECKS'}:null}}}};
+else if (args.includes('graphql')) result={data:{repository:{pullRequest:{headRefOid:head,state:phase==='merged'?'MERGED':phase==='closed'?'CLOSED':'OPEN',mergeQueueEntry:phase==='queued'?{state:'QUEUED'}:phase==='validating'?{state:'AWAITING_CHECKS'}:null}}}};
 else if(args.some(x=>x.includes('/rules/branches/'))) {
  if (phase==='queue-error') { process.stderr.write('gh: Forbidden (HTTP 403)'); process.exit(1); }
  result=['legacy','classic','classic-stack'].includes(phase)?[[]]:[[{type:'merge_queue'}]];
@@ -57,6 +58,7 @@ else result=pull(args.some(x=>x.endsWith('/pulls/2'))?2:1);
 process.stdout.write(JSON.stringify(result));
 `, { mode: 0o700 });
   writeFileSync(join(root, 'codex'), `#!${process.execPath}\nrequire('node:fs').appendFileSync(process.env.REPOQ_NATIVE_FIXTURE + '/wakes', JSON.stringify(process.argv.slice(2)) + '\\n');`, { mode: 0o700 });
+  writeFileSync(join(root, 'prepared.json'), '{"prepared":true}\n');
   const phase = (value: string): void => { writeFileSync(join(root, 'phase'), value); };
   const command = async (args: string[]): Promise<string> => (await exec(process.execPath, [cli, '--state', store.stateDir, ...args], { env, timeout: 15_000 })).stdout;
   process.env.PATH = env.PATH;
@@ -229,5 +231,165 @@ test('missing or errored native queue capability cannot silently become a legacy
       await assert.rejects(command(registration(root)), /GitHub/);
       assert.deepEqual(store.list(), []);
     }
+  });
+});
+
+const reentry = (root: string, id: string, token: string): string[] => ['reenter', id, `--token=${token}`,
+  '--agent', 'codex', '--task', task, '--cwd', root, '--quiescent', '--authorize-merge', '--reason', 'Prepared after native queue enablement'];
+
+async function completeLegacy(root: string, store: Store, command: (args: string[]) => Promise<string>, pr = 1, checkpoint = true) {
+  await command(['add', `https://github.com/fixture/repo/pull/${pr}`, '--agent', 'codex', '--task', task, '--cwd', root,
+    ...(checkpoint ? ['--checkpoint', join(root, 'prepared.json')] : [])]);
+  const entry = store.reserve()[0];
+  assert.ok(entry?.token);
+  await command(['claim', entry.id, `--token=${entry.token}`]);
+  await command(['done', entry.id, `--token=${entry.token}`]);
+  return { ...store.verifyOwnership(entry.id, entry.token), token: entry.token };
+}
+
+test('completed legacy owner reenters a native queue with a fresh repair wake and unchanged history', async (t) => {
+  await fixture(async (root, store, command, phase) => {
+    const previous = await completeLegacy(root, store, command);
+    await assert.rejects(command(registration(root)), /retains its mode/);
+    t.diagnostic('Before: submit for completed legacy #1 rejects native mode; recover cannot reopen its claim.');
+    await command(reentry(root, previous.id, previous.token));
+    const next = store.list()[1];
+    assert.ok(next?.native && next.token);
+    assert.notEqual(next.id, previous.id);
+    assert.notEqual(next.token, previous.token);
+    assert.deepEqual(store.list()[0], previous);
+    await command(registration(root));
+    assert.equal(store.list().length, 2);
+    await assert.rejects(command(reentry(root, previous.id, previous.token)), /already has successor/);
+    assert.equal(store.reentries()[0]?.entry_id, next.id);
+    t.diagnostic('After: reenter creates a fresh waiting/native attempt, retains old done row and audits the reason; submit is idempotent on the successor.');
+    await monitorNative(store);
+    const calls: unknown[] = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const mutations = calls.filter(value => Array.isArray(value) && value.includes('PUT'));
+    assert.equal(mutations.length, 1);
+    const mutation = mutations[0];
+    assert.ok(Array.isArray(mutation));
+    assert.ok(mutation.includes('merge_action=merge_queue'));
+    assert.ok(mutation.includes(`sha=${sha}`));
+    phase('queued');
+    const saved = store.list()[1]?.native;
+    assert.ok(saved);
+    store.updateNative(next.id, saved, { ...saved, next_check: 0 });
+    await monitorNative(store);
+    phase('ejected');
+    const queued = store.list()[1]?.native;
+    assert.ok(queued);
+    store.updateNative(next.id, queued, { ...queued, next_check: 0 });
+    await command(['start']);
+    await until(() => store.list()[1]?.delivery_status === 'sent');
+    await command(['stop']);
+    const wakes = readFileSync(join(root, 'wakes'), 'utf8').trim().split('\n');
+    assert.equal(wakes.length, 1);
+    const wake: unknown = JSON.parse(wakes[0] ?? 'null');
+    assert.ok(Array.isArray(wake));
+    assert.deepEqual(wake.slice(0, 3), ['queue', '--thread', task]);
+    assert.match(String(wake[4]), new RegExp(next.id));
+    assert.ok(String(wake[4]).includes(`--token=${next.token}`));
+    assert.ok(!String(wake[4]).includes(previous.token));
+    await assert.rejects(command(['claim', next.id, `--token=${previous.token}`]), /stale or invalid/);
+    await command(['claim', next.id, `--token=${next.token}`]);
+    phase('ready');
+    await command(['resume-native', next.id, `--token=${next.token}`]);
+    assert.equal(store.list()[1]?.state, 'waiting');
+    assert.deepEqual(store.list()[0], previous);
+    const status: unknown = JSON.parse(await command(['status']));
+    assert.ok(typeof status === 'object' && status !== null && 'reentries' in status);
+    assert.deepEqual(status.reentries, store.reentries());
+    t.diagnostic('Simulated provider received one queue-only request at the prepared SHA; ejection delivered one wake to the saved task with only the new token; the owner claimed and resumed it.');
+  });
+});
+
+test('reentry fails closed on provider state, missing authority, prior delivery and unfinished prefix ownership', async () => {
+  await fixture(async (root, store, command, phase) => {
+    const previous = await completeLegacy(root, store, command, 2);
+    const args = reentry(root, previous.id, previous.token);
+    await assert.rejects(command(args.filter(arg => arg !== '--quiescent')), /requires --quiescent/);
+    await assert.rejects(command(args.filter(arg => arg !== '--authorize-merge')), /requires --authorize-merge/);
+    for (const [value, error] of [
+      ['closed', /requires an open PR/], ['merged', /requires an open PR/],
+      ['legacy', /requires a native GitHub queue/], ['queue-error', /GitHub API request failed/],
+      ['queued', /already in the GitHub queue/], ['stack', /whole prefix is authorized/],
+    ] as const) {
+      phase(value);
+      await assert.rejects(command(args), error);
+      assert.deepEqual(store.list(), [previous]);
+      assert.deepEqual(store.reentries(), []);
+    }
+    phase('stack');
+    await command(['add', 'https://github.com/fixture/repo/pull/1', '--agent', 'codex', '--task', task, '--cwd', root]);
+    await assert.rejects(command([...args, '--stack']), /overlaps an unfinished/);
+    assert.deepEqual(store.list()[0], previous);
+    assert.deepEqual(store.reentries(), []);
+    const calls: unknown[] = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(calls.every(value => Array.isArray(value) && !value.includes('PUT')));
+    assert.equal(existsSync(join(root, 'wakes')), false);
+  });
+  await fixture(async (root, store, command) => {
+    await command(['add', 'https://github.com/fixture/repo/pull/1', '--agent', 'codex', '--task', task, '--cwd', root, '--checkpoint', join(root, 'prepared.json')]);
+    const entry = store.reserve()[0];
+    assert.ok(entry?.token);
+    const ledger = new DeliveryLedger(store.stateDir);
+    try {
+      const attempt = ledger.admit(entry, process.pid);
+      assert.ok(attempt);
+      await command(['claim', entry.id, `--token=${entry.token}`]);
+      await command(['done', entry.id, `--token=${entry.token}`]);
+      const previous = store.list()[0];
+      await assert.rejects(command(reentry(root, entry.id, entry.token)), /delivery is active or unreconciled/);
+      assert.deepEqual(store.list(), [previous]);
+      assert.deepEqual(store.reentries(), []);
+      ledger.release(attempt);
+      await command(reentry(root, entry.id, entry.token));
+      assert.equal(store.list().length, 2);
+    } finally { ledger.close(); }
+  });
+});
+
+
+test('reentry attaches a prepared checkpoint only to a successor when history has none', async () => {
+  await fixture(async (root, store, command) => {
+    const previous = await completeLegacy(root, store, command, 1, false);
+    assert.equal(previous.checkpoint_path, undefined);
+    const args = reentry(root, previous.id, previous.token);
+    await assert.rejects(command(args), /requires a prepared checkpoint/);
+    await assert.rejects(command([...args, '--checkpoint', join(root, 'missing.json')]), /ENOENT/);
+    await assert.rejects(command([...args, '--checkpoint', root]), /regular file/);
+    assert.deepEqual(store.list(), [previous]);
+    assert.deepEqual(store.reentries(), []);
+    const calls: unknown[] = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(calls.every(value => Array.isArray(value) && !value.includes('PUT')));
+    assert.equal(existsSync(join(root, 'wakes')), false);
+    const checkpoint = join(root, 'prepared.json');
+    await command([...args, '--checkpoint', checkpoint]);
+    assert.equal(store.list()[1]?.checkpoint_path, realpathSync(checkpoint));
+    assert.deepEqual(store.list()[0], previous);
+  });
+});
+
+test('reentry preserves an existing checkpoint and requires its original file to be restored', async () => {
+  await fixture(async (root, store, command) => {
+    const previous = await completeLegacy(root, store, command);
+    const args = reentry(root, previous.id, previous.token);
+    const checkpoint = join(root, 'prepared.json');
+    const replacement = join(root, 'replacement.json');
+    writeFileSync(replacement, '{"prepared":true}\n');
+    await assert.rejects(command([...args, '--checkpoint', replacement]), /preserve the saved checkpoint/);
+    rmSync(checkpoint);
+    await assert.rejects(command(args), /ENOENT/);
+    await assert.rejects(command([...args, '--checkpoint', replacement]), /preserve the saved checkpoint/);
+    assert.deepEqual(store.list(), [previous]);
+    assert.deepEqual(store.reentries(), []);
+    const calls: unknown[] = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(calls.every(value => Array.isArray(value) && !value.includes('PUT')));
+    assert.equal(existsSync(join(root, 'wakes')), false);
+    writeFileSync(checkpoint, '{"prepared":true}\n');
+    await command([...args, '--checkpoint', checkpoint]);
+    assert.equal(store.list()[1]?.checkpoint_path, previous.checkpoint_path);
+    assert.deepEqual(store.list()[0], previous);
   });
 });
